@@ -1,0 +1,267 @@
+"""FastAPI 集成测试 — 使用 TestClient + 静态 Key"""
+
+
+import os
+from collections.abc import AsyncIterator
+
+import pytest
+import pytest_asyncio
+from asgi_lifespan import LifespanManager
+from httpx import ASGITransport, AsyncClient
+
+
+# 不建议使用 setdefault，防止系统已有同名环境变量
+os.environ["ADMIN_API_KEYS"] = "sk-test-admin"
+os.environ["USER_API_KEYS"] = "sk-test-user"
+
+
+@pytest_asyncio.fixture
+async def client() -> AsyncIterator[AsyncClient]:
+    """创建会自动执行 FastAPI lifespan 的异步客户端"""
+    # 必须在环境变量设置后导入
+    from src.server.main import app
+
+    async with LifespanManager(app) as manager:
+        transport = ASGITransport(app=manager.app)
+
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as async_client:
+            yield async_client
+
+
+@pytest.fixture
+def admin_headers() -> dict[str, str]:
+    return {"Authorization": "Bearer sk-test-admin"}
+
+
+@pytest.fixture
+def user_headers() -> dict[str, str]:
+    return {"Authorization": "Bearer sk-test-user"}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 健康检查 (无认证)
+# ═══════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_health_live(client: AsyncClient):
+    resp = await client.get("/health/live")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_health_ready(client: AsyncClient):
+    resp = await client.get("/health/ready")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 认证
+# ═══════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_no_auth_returns_401(client: AsyncClient):
+    resp = await client.get("/api/v1/me")
+    assert resp.status_code == 401
+    data = resp.json()
+    assert data["error"]["code"] == "AUTHENTICATION_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_invalid_key_returns_401(client: AsyncClient):
+    resp = await client.get(
+        "/api/v1/me",
+        headers={"Authorization": "Bearer sk-invalid"},
+    )
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_valid_admin_key_works(client: AsyncClient, admin_headers):
+    resp = await client.get("/api/v1/me", headers=admin_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["role"] == "admin"
+
+
+@pytest.mark.asyncio
+async def test_valid_user_key_works(client: AsyncClient, user_headers):
+    resp = await client.get("/api/v1/me", headers=user_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["role"] == "user"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 会话
+# ═══════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_create_session(client: AsyncClient, user_headers):
+    resp = await client.post(
+        "/api/v1/sessions",
+        json={"title": "测试会话"},
+        headers=user_headers,
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "session_id" in data
+    assert data["title"] == "测试会话"
+    assert data["message_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_sessions(client: AsyncClient, user_headers):
+    # 先创建一个
+    await client.post("/api/v1/sessions", json={}, headers=user_headers)
+    resp = await client.get("/api/v1/sessions", headers=user_headers)
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_delete_session(client: AsyncClient, user_headers):
+    resp = await client.post("/api/v1/sessions", json={}, headers=user_headers)
+    session_id = resp.json()["session_id"]
+
+    resp = await client.delete(
+        f"/api/v1/sessions/{session_id}",
+        headers=user_headers,
+    )
+    assert resp.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_cannot_access_other_user_session(
+    client: AsyncClient, user_headers,
+):
+    """验证用户隔离: user 创建会话, admin 不能访问"""
+    # user 创建会话
+    resp = await client.post(
+        "/api/v1/sessions", json={}, headers=user_headers,
+    )
+    session_id = resp.json()["session_id"]
+
+    # 另一个用户 (admin) 尝试访问 → 应返回 404 (不暴露存在性)
+    admin_hdrs = {"Authorization": "Bearer sk-test-admin"}
+    resp = await client.get(
+        f"/api/v1/sessions/{session_id}/messages",
+        headers=admin_hdrs,
+    )
+    assert resp.status_code == 404
+
+
+# ═══════════════════════════════════════════════════════════════
+# 问答 (fallback 模式 — 无外部 LLM)
+# ═══════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_chat_sync(client: AsyncClient, user_headers):
+    """同步问答 — 在无 API Key 时使用 fallback 模式"""
+    resp = await client.post(
+        "/api/v1/chat",
+        json={"query": "你好"},
+        headers=user_headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "answer" in data
+    assert "session_id" in data
+
+
+@pytest.mark.asyncio
+async def test_chat_with_existing_session(
+    client: AsyncClient, user_headers,
+):
+    """在已有会话中问答"""
+    # 创建会话
+    resp = await client.post(
+        "/api/v1/sessions", json={"title": "Chat"},
+        headers=user_headers,
+    )
+    session_id = resp.json()["session_id"]
+
+    # 在该会话中问答
+    resp = await client.post(
+        "/api/v1/chat",
+        json={"query": "你好", "session_id": session_id},
+        headers=user_headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["session_id"] == session_id
+
+
+@pytest.mark.asyncio
+async def test_chat_stream(client: AsyncClient, user_headers):
+    """SSE 流式问答 — 验证事件类型"""
+    resp = await client.post(
+        "/api/v1/chat/stream",
+        json={"query": "你好"},
+        headers=user_headers,
+    )
+    assert resp.status_code == 200
+    assert "text/event-stream" in resp.headers.get("content-type", "")
+
+    # 解析 SSE 事件
+    import json
+    events = []
+    current_event = None
+    for line in resp.text.split("\n"):
+        line = line.strip()
+        if line.startswith("event: "):
+            current_event = line[7:]
+        elif line.startswith("data: ") and current_event:
+            data = json.loads(line[6:])
+            events.append((current_event, data))
+            current_event = None
+
+    # 验证事件顺序: start → token* → done
+    assert len(events) >= 2
+    assert events[0][0] == "start"
+    assert events[-1][0] == "done"
+
+
+@pytest.mark.asyncio
+async def test_chat_query_too_long(client: AsyncClient, user_headers):
+    """验证 query 长度限制"""
+    resp = await client.post(
+        "/api/v1/chat",
+        json={"query": "x" * 5000},
+        headers=user_headers,
+    )
+    assert resp.status_code == 422
+
+
+# ═══════════════════════════════════════════════════════════════
+# 用户管理 (admin only)
+# ═══════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_admin_can_create_user(client: AsyncClient):
+    admin_hdrs = {"Authorization": "Bearer sk-test-admin"}
+    resp = await client.post(
+        "/api/v1/users",
+        json={"name": "Test User", "role": "user"},
+        headers=admin_hdrs,
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["name"] == "Test User"
+    assert data["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_user_cannot_create_user(client: AsyncClient, user_headers):
+    """普通用户不能创建用户"""
+    resp = await client.post(
+        "/api/v1/users",
+        json={"name": "Hacker", "role": "admin"},
+        headers=user_headers,
+    )
+    assert resp.status_code == 403
