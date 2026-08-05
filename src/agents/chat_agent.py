@@ -56,7 +56,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langchain_core.messages import (
-    HumanMessage, AIMessage, SystemMessage, BaseMessage
+    HumanMessage, AIMessage, AIMessageChunk, SystemMessage, BaseMessage
 )
 
 from .base import BaseAgent
@@ -418,14 +418,20 @@ class ChatAgent(BaseAgent):
         while attempt < max_attempts:
             try:
                 full_response = ""
-                for event in self._graph.stream({"messages": messages}, config):
-                    for node_name, node_output in event.items():
-                        msgs = node_output.get("messages", [])
-                        for msg in msgs:
-                            if isinstance(msg, AIMessage) and msg.content:
-                                chunk = str(msg.content)
-                                full_response += chunk
-                                yield chunk
+                for message_chunk, metadata in self._graph.stream(
+                    {"messages": messages},
+                    config,
+                    stream_mode="messages",
+                ):
+                    if metadata.get("langgraph_node") != "agent":
+                        continue
+                    if not isinstance(message_chunk, AIMessageChunk):
+                        continue
+
+                    chunk = self._message_chunk_text(message_chunk.content)
+                    if chunk:
+                        full_response += chunk
+                        yield chunk
                 return  # 成功完成
 
             except Exception as e:
@@ -707,7 +713,7 @@ class ChatAgent(BaseAgent):
             return f"抱歉，处理请求时出错: {e}"
 
     async def achat_stream(self, user_input: str, thread_id: str = None):
-        """异步流式对话 — 内部调用 self._graph.astream()
+        """异步流式对话，逐模型消息块返回文本。
 
         使用:
             async for chunk in agent.achat_stream("你好"):
@@ -721,6 +727,10 @@ class ChatAgent(BaseAgent):
             self.initialize()
 
         tid = thread_id or self._thread_id
+
+        if not CAN_RUN or not self.model or not self._graph:
+            yield self._fallback_response(user_input)
+            return
 
         config_for_check = {"configurable": {"thread_id": tid}}
         current_state = self._graph.get_state(config_for_check)
@@ -737,20 +747,43 @@ class ChatAgent(BaseAgent):
         config = {
             "configurable": {"thread_id": tid},
             "callbacks": [self._token_counter],
+            "recursion_limit": self.max_agent_steps * 2,
         }
 
         try:
-            async for event in self._graph.astream(
-                {"messages": messages}, config
+            async for message_chunk, metadata in self._graph.astream(
+                {"messages": messages},
+                config,
+                stream_mode="messages",
             ):
-                for node_name, node_output in event.items():
-                    for msg in node_output.get("messages", []):
-                        if isinstance(msg, AIMessage) and msg.content:
-                            yield str(msg.content)
+                if metadata.get("langgraph_node") != "agent":
+                    continue
+                if not isinstance(message_chunk, AIMessageChunk):
+                    continue
+
+                text = self._message_chunk_text(message_chunk.content)
+                if text:
+                    yield text
 
         except Exception as e:
             self.logger.error(f"❌ Agent 异步流式错误: {e}")
             yield f"抱歉，处理请求时出错: {e}"
+
+    @staticmethod
+    def _message_chunk_text(content) -> str:
+        """从不同 Provider 的消息块结构中提取可展示文本。"""
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "".join(parts)
 
     # ══════════════════════════════════════════════════════════════
     # 兜底

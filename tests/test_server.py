@@ -1,44 +1,7 @@
-"""FastAPI 集成测试 — 使用 TestClient + 静态 Key"""
-
-
-import os
-from collections.abc import AsyncIterator
+"""FastAPI 集成测试 — 使用持久化动态 Key"""
 
 import pytest
-import pytest_asyncio
-from asgi_lifespan import LifespanManager
-from httpx import ASGITransport, AsyncClient
-
-
-# 不建议使用 setdefault，防止系统已有同名环境变量
-os.environ["ADMIN_API_KEYS"] = "sk-test-admin"
-os.environ["USER_API_KEYS"] = "sk-test-user"
-
-
-@pytest_asyncio.fixture
-async def client() -> AsyncIterator[AsyncClient]:
-    """创建会自动执行 FastAPI lifespan 的异步客户端"""
-    # 必须在环境变量设置后导入
-    from src.server.main import app
-
-    async with LifespanManager(app) as manager:
-        transport = ASGITransport(app=manager.app)
-
-        async with AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as async_client:
-            yield async_client
-
-
-@pytest.fixture
-def admin_headers() -> dict[str, str]:
-    return {"Authorization": "Bearer sk-test-admin"}
-
-
-@pytest.fixture
-def user_headers() -> dict[str, str]:
-    return {"Authorization": "Bearer sk-test-user"}
+from httpx import AsyncClient
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -138,7 +101,7 @@ async def test_delete_session(client: AsyncClient, user_headers):
 
 @pytest.mark.asyncio
 async def test_cannot_access_other_user_session(
-    client: AsyncClient, user_headers,
+    client: AsyncClient, user_headers, admin_headers,
 ):
     """验证用户隔离: user 创建会话, admin 不能访问"""
     # user 创建会话
@@ -148,10 +111,9 @@ async def test_cannot_access_other_user_session(
     session_id = resp.json()["session_id"]
 
     # 另一个用户 (admin) 尝试访问 → 应返回 404 (不暴露存在性)
-    admin_hdrs = {"Authorization": "Bearer sk-test-admin"}
     resp = await client.get(
         f"/api/v1/sessions/{session_id}/messages",
-        headers=admin_hdrs,
+        headers=admin_headers,
     )
     assert resp.status_code == 404
 
@@ -243,17 +205,46 @@ async def test_chat_query_too_long(client: AsyncClient, user_headers):
 # ═══════════════════════════════════════════════════════════════
 
 @pytest.mark.asyncio
-async def test_admin_can_create_user(client: AsyncClient):
-    admin_hdrs = {"Authorization": "Bearer sk-test-admin"}
+async def test_admin_can_create_user(client: AsyncClient, admin_headers):
     resp = await client.post(
         "/api/v1/users",
         json={"name": "Test User", "role": "user"},
-        headers=admin_hdrs,
+        headers=admin_headers,
     )
     assert resp.status_code == 201
     data = resp.json()
     assert data["name"] == "Test User"
     assert data["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_key_created_for_admin_member_has_admin_permissions(
+    client: AsyncClient,
+    admin_headers,
+):
+    """管理员成员的新 Key 应能继续访问管理员接口。"""
+    create_user_resp = await client.post(
+        "/api/v1/users",
+        json={"name": "Second Admin", "role": "admin"},
+        headers=admin_headers,
+    )
+    assert create_user_resp.status_code == 201
+
+    create_key_resp = await client.post(
+        "/api/v1/api-keys",
+        json={"user_id": create_user_resp.json()["user_id"]},
+        headers=admin_headers,
+    )
+    assert create_key_resp.status_code == 201
+
+    new_admin_headers = {
+        "Authorization": f"Bearer {create_key_resp.json()['key']}"
+    }
+    list_users_resp = await client.get(
+        "/api/v1/users",
+        headers=new_admin_headers,
+    )
+    assert list_users_resp.status_code == 200
 
 
 @pytest.mark.asyncio

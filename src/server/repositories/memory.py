@@ -43,16 +43,11 @@ class InMemoryUserRepo:
 class InMemoryApiKeyRepo:
     def __init__(self):
         self._keys: dict[str, ApiKey] = {}     # prefix → ApiKey
-        self._plain_map: dict[str, str] = {}   # plain_key → prefix
         self._lock = asyncio.Lock()
 
     @staticmethod
     def _hash(key: str) -> str:
         return hashlib.sha256(key.encode()).hexdigest()
-
-    @staticmethod
-    def _prefix(key: str) -> str:
-        return key[:11] + "***" + key[-4:]
 
     async def create(self, user_id: str, key_hash: str, prefix: str) -> ApiKey:
         async with self._lock:
@@ -60,23 +55,7 @@ class InMemoryApiKeyRepo:
             self._keys[prefix] = entry
             return entry
 
-    async def register_plain(self, plain_key: str, prefix: str) -> None:
-        """注册明文 Key → prefix 映射 (仅用于静态配置)"""
-        self._plain_map[plain_key] = prefix
-
     async def validate(self, api_key: str) -> Identity | None:
-        # 1. 通过明文映射 (静态配置的 Key)
-        prefix = self._plain_map.get(api_key)
-        if prefix and prefix in self._keys:
-            entry = self._keys[prefix]
-            if entry.revoked_at is None:
-                return Identity(
-                    user_id=entry.user_id,
-                    role="user",
-                    api_key_prefix=entry.prefix,
-                )
-
-        # 2. 通过哈希匹配 (动态创建的 Key)
         key_hash = self._hash(api_key)
         for entry in self._keys.values():
             if entry.key_hash == key_hash and entry.revoked_at is None:

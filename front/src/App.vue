@@ -1,24 +1,36 @@
 <template>
-  <div class="app-shell">
-    <TopBar />
-    <div class="body">
-      <Sidebar />
-      <main class="main">
-        <router-view />
-      </main>
-    </div>
-    <Toast />
-  </div>
+  <RouterView />
+  <ToastViewport />
 </template>
 
-<script setup>
-import TopBar from './components/TopBar.vue'
-import Sidebar from './components/Sidebar.vue'
-import Toast from './components/Toast.vue'
-</script>
+<script setup lang="ts">
+import { onBeforeUnmount, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { useAppStore } from './stores/app'
+import ToastViewport from './components/feedback/ToastViewport.vue'
 
-<style scoped>
-.app-shell { height: 100%; display: flex; flex-direction: column; }
-.body { display: flex; flex: 1; overflow: hidden; height: calc(100% - 42px); }
-.main { flex: 1; overflow: hidden; background: var(--paper); display: flex; flex-direction: column; }
-</style>
+const store = useAppStore()
+const router = useRouter()
+
+function handleUnauthorized() {
+  store.markDisconnected('API Key 已失效，请重新连接。')
+  void router.replace({ name: 'connect' })
+}
+
+onMounted(async () => {
+  window.addEventListener('mka:unauthorized', handleUnauthorized)
+  if (store.apiKey && !store.connected) {
+    try {
+      await store.bootstrap()
+    } catch {
+      if (router.currentRoute.value.meta.requiresAuth) {
+        await router.replace({ name: 'connect' })
+      }
+    }
+  }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('mka:unauthorized', handleUnauthorized)
+})
+</script>

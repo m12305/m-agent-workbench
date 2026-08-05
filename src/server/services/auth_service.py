@@ -1,8 +1,7 @@
-"""认证服务 — Key 校验, 用户/API Key 管理"""
+"""认证服务 — 持久化 Key 校验, 用户/API Key 管理"""
 
 import hashlib
 import secrets
-import logging
 from datetime import datetime
 
 from ..repositories.base import (
@@ -10,68 +9,17 @@ from ..repositories.base import (
 )
 from ..exceptions import AuthorizationError, NotFoundError
 
-logger = logging.getLogger("server.auth_service")
-
-STATIC_KEY_PREFIX = "sk-static"
-
 
 class AuthService:
-    """认证服务
-
-    支持两种 Key 来源:
-    1. 静态配置 (ADMIN_API_KEYS / USER_API_KEYS 环境变量)
-    2. 动态创建 (POST /api/v1/api-keys)
-    """
+    """管理持久化用户及其 API Key。"""
 
     def __init__(
         self,
         user_repo: UserRepository,
         api_key_repo: ApiKeyRepository,
-        admin_keys: list[str] | None = None,
-        user_keys: list[str] | None = None,
     ):
         self._user_repo = user_repo
         self._api_key_repo = api_key_repo
-        self._admin_keys = set(admin_keys or [])
-        self._user_keys = set(user_keys or [])
-        # 静态 Key → Identity 的映射
-        self._static_identities: dict[str, Identity] = {}
-
-    async def initialize(self) -> None:
-        """注册静态配置的 Key (启动时调用)"""
-        for key in self._admin_keys:
-            await self._register_static_key(key, "admin")
-        for key in self._user_keys:
-            await self._register_static_key(key, "user")
-        count = len(self._admin_keys) + len(self._user_keys)
-        if count > 0:
-            logger.info("已加载 %d 个静态 API Key", count)
-
-    async def _register_static_key(self, plain_key: str, role: str) -> None:
-        """注册一个静态 Key"""
-        user_id = f"{STATIC_KEY_PREFIX}-{role}-{hashlib.md5(plain_key.encode()).hexdigest()[:6]}"
-        prefix = self._key_prefix(plain_key)
-        key_hash = self._hash_key(plain_key)
-
-        # 确保用户存在
-        existing = await self._user_repo.get_by_id(user_id)
-        if not existing:
-            await self._user_repo.create(
-                name=f"Static {role} ({prefix})",
-                role=role,
-            )
-
-        # 注册 Key
-        await self._api_key_repo.create(user_id, key_hash, prefix)
-        # 同时注册明文映射 (用于 validate_key)
-        if hasattr(self._api_key_repo, 'register_plain'):
-            await self._api_key_repo.register_plain(plain_key, prefix)
-
-        self._static_identities[plain_key] = Identity(
-            user_id=user_id,
-            role=role,
-            api_key_prefix=prefix,
-        )
 
     @staticmethod
     def _hash_key(key: str) -> str:
@@ -82,13 +30,20 @@ class AuthService:
         return key[:11] + "***" + key[-4:]
 
     async def validate_key(self, api_key: str) -> Identity | None:
-        """校验 API Key，返回 Identity 或 None"""
-        # 1. 先查静态映射
-        if identity := self._static_identities.get(api_key):
-            return identity
+        """校验持久化 API Key，并从用户表读取当前真实角色。"""
+        identity = await self._api_key_repo.validate(api_key)
+        if not identity:
+            return None
 
-        # 2. 查动态创建的 Key
-        return await self._api_key_repo.validate(api_key)
+        user = await self._user_repo.get_by_id(identity.user_id)
+        if not user:
+            return None
+
+        return Identity(
+            user_id=user.user_id,
+            role=user.role,
+            api_key_prefix=identity.api_key_prefix,
+        )
 
     async def create_user(self, name: str, role: str) -> dict:
         """创建用户"""
@@ -111,8 +66,6 @@ class AuthService:
         prefix = self._key_prefix(plain_key)
 
         await self._api_key_repo.create(user_id, key_hash, prefix)
-        if hasattr(self._api_key_repo, 'register_plain'):
-            await self._api_key_repo.register_plain(plain_key, prefix)
 
         return {
             "key": plain_key,

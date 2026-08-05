@@ -17,5 +17,5 @@ uvicorn src.server.main:app --reload --host 0.0.0.0 --port 8000
 # 2. 打开 webui/index.html
 #    直接在浏览器中打开文件即可 (file:// 协议)
 #    输入 API Base URL: http://localhost:8000/api/v1
-#    输入 API Key: sk-test-admin 或 sk-test-user
+#    输入由管理员创建并妥善保存的 API Key
 #    点击 "连接"

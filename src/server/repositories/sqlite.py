@@ -71,6 +71,7 @@ class SqliteDb:
         def _init():
             conn = self._get_conn()
             conn.executescript(SCHEMA_SQL)
+            conn.executescript(LEGACY_STATIC_KEY_MIGRATION_SQL)
             conn.commit()
         await asyncio.to_thread(_init)
         self._initialized = True
@@ -203,6 +204,28 @@ CREATE INDEX IF NOT EXISTS idx_tasks_document ON tasks(document_id);
 """
 
 
+# 旧版本把 .env 静态 Key 写入 api_keys，却可能没有正确创建关联用户。
+# 这里只修复已经持久化的数据，不再读取或注册任何环境变量 Key。
+LEGACY_STATIC_KEY_MIGRATION_SQL = """
+INSERT OR IGNORE INTO users (user_id, name, role, created_at)
+SELECT
+    api_key.user_id,
+    CASE
+        WHEN api_key.user_id LIKE 'sk-static-admin-%'
+            THEN 'Migrated admin (' || api_key.prefix || ')'
+        ELSE 'Migrated user (' || api_key.prefix || ')'
+    END,
+    CASE
+        WHEN api_key.user_id LIKE 'sk-static-admin-%' THEN 'admin'
+        ELSE 'user'
+    END,
+    api_key.created_at
+FROM api_keys AS api_key
+WHERE api_key.user_id LIKE 'sk-static-admin-%'
+   OR api_key.user_id LIKE 'sk-static-user-%';
+"""
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 序列化 / 反序列化工具
 # ═══════════════════════════════════════════════════════════════════
@@ -300,22 +323,15 @@ class SqliteApiKeyRepo:
 
     安全设计:
       - key_hash 存储 SHA-256 哈希值 (不存明文)
-      - register_plain() 仅在内存中维护明文映射 (用于静态配置 Key)
-      - validate() 先查内存映射，再查哈希表
+      - validate() 仅通过哈希表校验持久化 Key
     """
 
     def __init__(self, db: SqliteDb):
         self._db = db
-        # 内存明文映射 (仅静态 Key 注册，不落盘)
-        self._plain_map: dict[str, str] = {}  # plain_key → prefix
 
     @staticmethod
     def _hash(key: str) -> str:
         return hashlib.sha256(key.encode()).hexdigest()
-
-    @staticmethod
-    def _prefix(key: str) -> str:
-        return key[:11] + "***" + key[-4:]
 
     # ── 协议方法 ──
 
@@ -329,25 +345,7 @@ class SqliteApiKeyRepo:
         return ApiKey(key_hash=key_hash, prefix=prefix, user_id=user_id,
                        created_at=datetime.fromisoformat(now))
 
-    async def register_plain(self, plain_key: str, prefix: str) -> None:
-        """注册明文 Key → prefix 映射 (仅用于静态配置 Key, 不持久化)"""
-        self._plain_map[plain_key] = prefix
-
     async def validate(self, api_key: str) -> Identity | None:
-        # 1. 明文映射 (静态 Key — 最快)
-        prefix = self._plain_map.get(api_key)
-        if prefix:
-            row = await self._db.fetchone(
-                "SELECT user_id, prefix FROM api_keys WHERE prefix = ? AND revoked_at IS NULL",
-                (prefix,),
-            )
-            if row:
-                return Identity(
-                    user_id=row["user_id"], role="user",
-                    api_key_prefix=row["prefix"],
-                )
-
-        # 2. 哈希匹配 (动态 Key)
         key_hash = self._hash(api_key)
         row = await self._db.fetchone(
             "SELECT user_id, prefix FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL",

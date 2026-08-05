@@ -116,12 +116,8 @@ async def chat_stream(
     return EventSourceResponse(
         event_generator(),
         background=BackgroundTask(after_stream),
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
     )
-
-    # return EventSourceResponse(
-    #     event_generator(),
-    #     background=after_stream(),
-    # )
-
-
-

@@ -82,24 +82,11 @@ async def lifespan(app: FastAPI):
         task_repo = InMemoryTaskRepo()
         logger.info("存储后端: 内存 (REPOSITORY_BACKEND=memory)")
 
-    # ── 静态 Key 配置 ──
-    admin_keys = [
-        k.strip() for k in
-        os.getenv("ADMIN_API_KEYS", "").split(",") if k.strip()
-    ]
-    user_keys = [
-        k.strip() for k in
-        os.getenv("USER_API_KEYS", "").split(",") if k.strip()
-    ]
-
     # ── Auth ──
     auth_service = AuthService(
         user_repo=user_repo,
         api_key_repo=api_key_repo,
-        admin_keys=admin_keys,
-        user_keys=user_keys,
     )
-    await auth_service.initialize()
 
     session_service = SessionService(session_repo=session_repo)
 
@@ -250,9 +237,8 @@ async def lifespan(app: FastAPI):
     app.state.milvus = milvus
     app.state.sqlite_db = sqlite_db
 
-    logger.info("🚀 FastAPI 服务已启动 (admin_keys=%d, user_keys=%d, "
+    logger.info("🚀 FastAPI 服务已启动 (auth=persistent, "
                 "embedding=%s, milvus=%s, retrieval=%s)",
-                len(admin_keys), len(user_keys),
                 "on" if embedding else "off",
                 "on" if milvus else "off",
                 "on" if retrieval else "off")

@@ -2,6 +2,14 @@
 
 基于 RAG 架构的企业级知识管理平台，支持文档解析、向量索引、智能问答，并提供 Web 管理界面。
 
+<img title="" src="images/login.png" alt="" width="735">
+
+<img title="" src="images/main.png" alt="" width="735">
+
+<img title="" src="images/chat.png" alt="" width="735">
+
+<img title="" src="images/knowledge.png" alt="" width="735">
+
 ---
 
 ## 项目结构
@@ -70,9 +78,6 @@ cp .env.example .env
 # LLM (至少一个)
 DEEPSEEK_API_KEY=sk-your-key
 
-# API 认证
-ADMIN_API_KEYS=sk-admin-001
-
 # Embedding (可选, 无则不建索引)
 BAILIAN_API_KEY=sk-your-key
 
@@ -80,13 +85,23 @@ BAILIAN_API_KEY=sk-your-key
 MILVUS_HOST=localhost
 ```
 
-### 3. 启动后端
+### 3. 初始化首位管理员（仅全新数据库）
+
+API Key 不再从 `.env` 加载，而是创建后仅以哈希形式持久化。已有数据库可跳过此步：
+
+```bash
+python -m src.server.bootstrap_admin --name Administrator
+```
+
+命令只会显示一次完整 API Key，请立即妥善保存。
+
+### 4. 启动后端
 
 ```bash
 uvicorn src.server.main:app --reload --port 8000
 ```
 
-### 4. 启动前端
+### 5. 启动前端
 
 ```bash
 cd front
@@ -197,7 +212,7 @@ Upload → Storage (OSS/Local)
 | 分类 | 环境变量 | 说明 |
 |------|----------|------|
 | LLM | `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` | 模型 Provider |
-| 认证 | `ADMIN_API_KEYS` / `USER_API_KEYS` | 静态 API Key (逗号分隔) |
+| 认证 | — | 用户与 API Key 由工作台管理并持久化到数据库 |
 | Embedding | `BAILIAN_API_KEY` / `BAILIAN_WORKSPACE_ID` / `EMBEDDING_MODEL` | 阿里云百炼 |
 | Milvus | `MILVUS_HOST` / `MILVUS_PORT` / `MILVUS_VECTOR_DIM` | 向量数据库 |
 | 解析 | `MINERU_API_KEY` / `MINERU_API_URL` / `MINERU_MODEL_VERSION` | PDF OCR |
