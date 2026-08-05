@@ -1,6 +1,19 @@
-# m-Knowledge Assistant — 企业知识助手
+# m-agent-workbench
 
-基于 RAG 架构的企业级知识管理平台，支持文档解析、向量索引、智能问答，并提供 Web 管理界面。
+面向多 Agent 应用的统一工作台。
+
+`m-agent-workbench` 基于 FastAPI 与 Vue 3 构建，为 Agent 应用提供统一入口，并集中管理身份认证、成员权限、会话、知识库和运行状态。当前内置 Chat Agent 与 RAG 知识库，后续 Agent 可以复用同一套工作台基础能力持续接入。
+
+## 核心能力
+
+- **Agent 应用中心**：从统一入口访问不同 Agent，当前提供 Chat Agent。
+- **流式智能对话**：支持 SSE 流式回答、多轮会话和会话历史。
+- **RAG 知识库**：支持文档解析、向量索引，以及私有、共享、混合范围检索。
+- **成员与密钥管理**：使用数据库持久化用户和 API Key，并按管理员、成员角色控制权限。
+- **可扩展工作台**：前端通过 Agent 注册表展示应用，后端提供 Agent 基类、工具注册与服务层，便于继续接入新 Agent。
+- **运行状态监控**：统一查看 Agent、Embedding、Milvus 与检索服务状态。
+
+## 界面预览
 
 <img title="" src="images/login.png" alt="" width="735">
 
@@ -15,42 +28,32 @@
 ## 项目结构
 
 ```
-m-knowledge-assistant/
-├── src/server/                    # FastAPI 后端服务
-│   ├── main.py                    # 入口 — 应用初始化 & 生命周期
-│   ├── api/                       # API 路由层
-│   │   ├── auth.py                # POST /api-keys, DELETE /api-keys/{prefix}
-│   │   ├── users.py               # /users CRUD (admin), /me
-│   │   ├── sessions.py            # /sessions CRUD
-│   │   └── chat.py                # /chat, /chat/stream
-│   ├── documents/                 # 文档管理模块
-│   │   ├── service.py             # 上传/查询/删除 + Milvus 同步
-│   │   └── router.py              # /documents + /download
-│   ├── repositories/              # 存储层
-│   │   ├── base.py                # 协议定义 (User/Document/Chunk/Task)
-│   │   ├── memory.py              # 内存实现 (测试用)
-│   │   └── sqlite.py              # SQLite 持久化 (默认)
-│   ├── services/                  # 业务服务
-│   │   ├── auth_service.py        # 认证 + 用户管理
-│   │   ├── session_service.py     # 会话管理
-│   │   ├── chat_service.py        # 问答编排
-│   │   ├── retrieval_service.py   # 向量检索 (基础)
-│   │   └── advanced_retrieval.py  # 高阶检索 (Query 改写 + 多路 + RRF)
-│   ├── embedding/bailian.py       # 阿里云百炼 Embedding
-│   ├── milvus/client.py           # Milvus 向量数据库 (Partition Key 隔离)
-│   ├── tasks/                     # 索引管线
-│   │   ├── worker.py              # 解析→分块→Embedding→Milvus
-│   │   └── in_process.py          # InProcessTaskQueue
-│   ├── parsing/                   # 文档解析 (Text/Markdown/PDF/MinerU)
-│   ├── chunking/                  # 文档分块策略
-│   └── storage/                   # 文件存储 (OSS / Local)
+m-agent-workbench/
+├── src/
+│   ├── agents/                    # Agent 层：BaseAgent / ChatAgent
+│   ├── tools/                     # Agent 工具基类与注册表
+│   ├── models/                    # LLM 适配
+│   ├── config/                    # Agent 全局配置
+│   └── server/                    # FastAPI 工作台后端
+│       ├── main.py                # 应用初始化与生命周期
+│       ├── api/                   # 认证、用户、会话与 Chat Agent API
+│       ├── documents/             # 知识库文档管理
+│       ├── repositories/          # SQLite / Memory 存储实现
+│       ├── services/              # 认证、会话、对话与检索编排
+│       ├── embedding/             # Embedding 服务适配
+│       ├── milvus/                # Milvus 向量数据库
+│       ├── tasks/                 # 文档索引任务管线
+│       ├── parsing/               # Text / Markdown / PDF / MinerU 解析
+│       ├── chunking/              # 文档分块策略
+│       └── storage/               # OSS / Local 文件存储
 │
 ├── front/                         # Vue 3 前端
-│   ├── src/views/                 # ChatView / DocumentsView / AdminView / SystemView
-│   ├── src/components/            # TopBar / Sidebar / ChatMessage / ChatInput …
-│   ├── src/stores/app.js          # Pinia 全局状态
-│   ├── src/api.js                 # 后端 API 封装
-│   └── src/style.css              # The Archive 设计令牌
+│   ├── src/constants/agents.ts    # Agent 应用注册表
+│   ├── src/views/                 # 应用中心、对话、知识库、管理与系统页面
+│   ├── src/components/            # 布局、对话与反馈组件
+│   ├── src/stores/app.ts          # Pinia 全局状态
+│   ├── src/api/client.ts          # 后端 API 客户端
+│   └── src/styles/main.css        # 工作台视觉样式
 │
 ├── webui/index.html               # 单文件测试控制台 (纯 HTML/JS)
 ├── .env.example                   # 环境变量模板
@@ -116,7 +119,7 @@ npm run dev        # http://localhost:5173
 
 ---
 
-## 后端 API
+## 工作台 API
 
 ### 认证 & 用户
 
@@ -140,7 +143,7 @@ npm run dev        # http://localhost:5173
 | `GET` | `/api/v1/sessions/{id}/messages` | 消息历史 |
 | `DELETE` | `/api/v1/sessions/{id}` | 删除会话 |
 
-### 问答
+### Chat Agent
 
 | 方法 | 端点 | 说明 |
 |------|------|------|
@@ -169,7 +172,17 @@ npm run dev        # http://localhost:5173
 
 ---
 
-## 架构设计
+## 工作台架构
+
+### Agent 扩展方式
+
+当前版本内置 Chat Agent，并将 Agent 实现与工作台通用能力分层：
+
+1. 在 `src/agents/` 中基于 `BaseAgent` 实现 Agent 能力，并按需注册工具。
+2. 在 FastAPI 服务层接入 Agent，复用认证、会话、知识检索和状态检查能力。
+3. 在 `front/src/constants/agents.ts` 注册应用信息与路由，使新 Agent 出现在应用中心。
+
+前端注册表负责应用入口展示；新 Agent 的后端接口与业务逻辑仍需显式实现，避免工作台展示尚不可用的能力。
 
 ### 用户数据隔离
 
@@ -221,17 +234,19 @@ Upload → Storage (OSS/Local)
 
 ---
 
-## 前端
+## 前端工作台
 
 两种前端可用:
 
 ### Vue 3 SPA (`front/`)
 
-基于 Vite + Vue 3 + Pinia + Vue Router 的完整单页应用:
-- 聊天 (SSE 流式 / markdown 渲染)
-- 文档上传 / 下载 / 删除
-- 用户 & API Key 管理 (admin)
-- 系统状态监控
+基于 Vite、Vue 3、Pinia 与 Vue Router 构建，提供：
+
+- Agent 应用中心与统一导航
+- Chat Agent 流式对话与 Markdown 渲染
+- RAG 知识库文档上传、下载、删除与索引状态跟踪
+- 管理员用户与 API Key 管理
+- 工作台依赖与运行状态监控
 
 ```bash
 cd front && npm install && npm run dev
@@ -239,7 +254,7 @@ cd front && npm install && npm run dev
 
 ### 测试控制台 (`webui/index.html`)
 
-单文件 HTML，零依赖 (除 marked.js CDN)，可直接在浏览器打开使用。功能与 Vue 版一致。
+单文件 HTML 调试界面，除 marked.js CDN 外无额外依赖，可直接在浏览器中连接后端进行基础功能验证。正式使用建议选择 Vue 3 工作台。
 
 ---
 
