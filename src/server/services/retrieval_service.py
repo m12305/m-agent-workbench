@@ -1,5 +1,6 @@
 """检索服务 — 查询向量化 + Milvus 搜索 + 结果格式化"""
 
+import asyncio
 import logging
 from ..milvus.client import MilvusClient, SearchResult
 
@@ -19,9 +20,11 @@ class RetrievalService:
         self,
         embedding_service,
         milvus_client: MilvusClient,
+        document_repository=None,
     ):
         self._embedding = embedding_service
         self._milvus = milvus_client
+        self._documents = document_repository
 
     async def search(
         self,
@@ -58,23 +61,62 @@ class RetrievalService:
         # 2. 按范围检索
         if scope == "hybrid":
             # 分别检索 private + shared，合并去重
-            private_hits = self._milvus.search(
-                query_vector, top_k=top_k,
-                scope="private", user_id=user_id,
+            private_hits = await asyncio.to_thread(
+                self._milvus.search,
+                query_vector,
+                top_k,
+                "private",
+                user_id,
             )
-            shared_hits = self._milvus.search(
-                query_vector, top_k=top_k,
-                scope="shared",
+            shared_hits = await asyncio.to_thread(
+                self._milvus.search,
+                query_vector,
+                top_k,
+                "shared",
             )
             hits = self._dedupe_and_merge(private_hits, shared_hits, top_k)
         else:
-            hits = self._milvus.search(
-                query_vector, top_k=top_k,
-                scope=scope, user_id=user_id if scope == "private" else "",
+            hits = await asyncio.to_thread(
+                self._milvus.search,
+                query_vector,
+                top_k,
+                scope,
+                user_id if scope == "private" else "",
             )
+
+        hits = await self._filter_committed(hits, user_id)
 
         logger.info("检索完成: scope=%s, hits=%d", scope, len(hits))
         return hits
+
+    async def _filter_committed(
+        self,
+        hits: list[SearchResult],
+        user_id: str,
+    ) -> list[SearchResult]:
+        """只暴露 SQLite 已提交的文档，隔离补偿延迟产生的孤儿向量。"""
+        if not hits or self._documents is None:
+            return hits
+        document_ids = list(dict.fromkeys(hit.document_id for hit in hits))
+        try:
+            documents = await self._documents.get_many(document_ids)
+        except Exception:
+            logger.exception("校验向量提交状态失败，本次不返回知识库结果")
+            return []
+
+        committed = {
+            doc.document_id: doc
+            for doc in documents
+            if doc.status == "indexed"
+        }
+        return [
+            hit for hit in hits
+            if (
+                (doc := committed.get(hit.document_id)) is not None
+                and doc.scope == hit.scope
+                and (hit.scope == "shared" or doc.user_id == user_id)
+            )
+        ]
 
     def _dedupe_and_merge(
         self,

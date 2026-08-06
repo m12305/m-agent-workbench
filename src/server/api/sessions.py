@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends
 
-from ..schemas import CreateSessionRequest, SessionResponse, MessageView
+from ..schemas import CreateSessionRequest, UpdateSessionRequest, SessionResponse, MessageView
 from ..deps import get_identity, get_session_service, get_chat_service
 from ..repositories.base import Identity
 from ..services.session_service import SessionService
@@ -86,7 +86,8 @@ async def get_messages(
         from langchain_core.messages import HumanMessage, AIMessage
         from datetime import datetime
 
-        for msg in state.values.get("messages", []):
+        stored_messages = state.values.get("messages", [])
+        for msg in chat_service.visible_messages(stored_messages):
             if isinstance(msg, HumanMessage):
                 messages.append(MessageView(
                     role="user", content=str(msg.content),
@@ -98,6 +99,29 @@ async def get_messages(
                     created_at=datetime.utcnow(),
                 ))
     return messages
+
+
+@router.patch(
+    "/sessions/{session_id}",
+    response_model=SessionResponse,
+)
+async def update_session(
+    body: UpdateSessionRequest,
+    session_id: str,
+    identity: Identity = Depends(get_identity),
+    session_service: SessionService = Depends(get_session_service),
+):
+    """重命名会话"""
+    session = await session_service.rename_session(
+        identity.user_id, session_id, body.title,
+    )
+    return SessionResponse(
+        session_id=session.session_id,
+        title=session.title,
+        message_count=session.message_count,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
 
 
 @router.delete(

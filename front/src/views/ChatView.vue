@@ -75,6 +75,7 @@ import { PhArrowUpRight as ArrowUpRight, PhChatCircleDots as ChatCircleDots, PhP
 import { api } from '../api/client'
 import { useAppStore } from '../stores/app'
 import type { Message, Session } from '../types/api'
+import { normalizeVisibleMessage } from '../utils/chatMessages'
 import ChatComposer from '../components/chat/ChatComposer.vue'
 import ChatMessage from '../components/chat/ChatMessage.vue'
 import SessionPanel from '../components/chat/SessionPanel.vue'
@@ -130,7 +131,10 @@ async function loadMessages(sessionId: string) {
   try {
     const result = await api.getMessages(sessionId)
     if (sequence !== loadSequence) return
-    messages.value = result.map((item) => ({ ...item, state: 'complete' }))
+    messages.value = result.map((item) => ({
+      ...normalizeVisibleMessage(item),
+      state: 'complete',
+    }))
     await scrollBottom(false)
   } catch (error) {
     store.notify('无法加载消息', error instanceof Error ? error.message : '', 'error')

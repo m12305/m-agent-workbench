@@ -324,7 +324,9 @@ class MilvusClient:
             parts.append(f'{FIELD_USER_ID} == ""')
 
         expr = " && ".join(parts)
-        count = self._collection.delete(expr)
+        result = self._collection.delete(expr)
+        self._collection.flush()
+        count = getattr(result, "delete_count", result)
         logger.info(
             "Milvus 删除: doc_id=%s, user_id=%s, count=%d",
             document_id, user_id, count,

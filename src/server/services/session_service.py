@@ -41,6 +41,19 @@ class SessionService:
         await self._repo.delete(session_id)
         logger.info("会话已删除: %s", session_id)
 
+    async def rename_session(
+        self, user_id: str, session_id: str, title: str | None,
+    ) -> Session:
+        """重命名会话 — 验证所有权后更新标题"""
+        session = await self.get_session(session_id)
+        if session.user_id != user_id:
+            raise NotFoundError("会话", session_id)
+        updated = await self._repo.update(session_id, title=title)
+        if not updated:
+            raise NotFoundError("会话", session_id)
+        logger.info("会话已重命名: %s → %r", session_id, title)
+        return updated
+
     async def bump_message_count(self, session_id: str) -> None:
         """问答后更新消息计数和时间戳"""
         session = await self._repo.get(session_id)

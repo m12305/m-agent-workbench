@@ -42,7 +42,7 @@
       <div class="section-title with-padding"><h2>工作区数据</h2><span>当前用户可见范围</span></div>
       <div class="resource-grid">
         <RouterLink :to="{ name: 'chat' }"><ChatsCircle :size="24" /><span><strong>{{ store.sessions.length }}</strong><small>历史会话</small></span><CaretRight :size="18" /></RouterLink>
-        <RouterLink :to="{ name: 'knowledge' }"><Files :size="24" /><span><strong>{{ store.documents.length }}</strong><small>知识文档</small></span><CaretRight :size="18" /></RouterLink>
+        <RouterLink :to="{ name: 'knowledge' }"><Files :size="24" /><span><strong>{{ store.documentsTotal }}</strong><small>知识文档</small></span><CaretRight :size="18" /></RouterLink>
         <div><Fingerprint :size="24" /><span><strong>{{ store.identity?.user_id.slice(0, 8) }}</strong><small>用户标识</small></span></div>
       </div>
     </section>

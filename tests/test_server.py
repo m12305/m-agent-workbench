@@ -88,6 +88,47 @@ async def test_list_sessions(client: AsyncClient, user_headers):
 
 
 @pytest.mark.asyncio
+async def test_regular_user_can_rename_own_session(
+    client: AsyncClient, user_headers,
+):
+    resp = await client.post(
+        "/api/v1/sessions",
+        json={"title": "旧标题"},
+        headers=user_headers,
+    )
+    session_id = resp.json()["session_id"]
+
+    resp = await client.patch(
+        f"/api/v1/sessions/{session_id}",
+        json={"title": "新标题"},
+        headers=user_headers,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "新标题"
+
+
+@pytest.mark.asyncio
+async def test_cannot_rename_another_users_session(
+    client: AsyncClient, user_headers, admin_headers,
+):
+    resp = await client.post(
+        "/api/v1/sessions",
+        json={"title": "用户会话"},
+        headers=user_headers,
+    )
+    session_id = resp.json()["session_id"]
+
+    resp = await client.patch(
+        f"/api/v1/sessions/{session_id}",
+        json={"title": "越权修改"},
+        headers=admin_headers,
+    )
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_delete_session(client: AsyncClient, user_headers):
     resp = await client.post("/api/v1/sessions", json={}, headers=user_headers)
     session_id = resp.json()["session_id"]

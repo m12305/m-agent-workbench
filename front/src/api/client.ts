@@ -3,6 +3,9 @@ import type {
   ApiKeyInfo,
   ChatResponse,
   CreatedApiKey,
+  DocumentBatchUpload,
+  DocumentListParams,
+  DocumentPage,
   DocumentRecord,
   DocumentScope,
   DocumentUpload,
@@ -104,9 +107,25 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  const response = await fetchWithErrors(`${getSavedApiBase()}${path}`, { ...init, headers })
-  if (response.status === 204) return undefined as T
-  return response.json() as Promise<T>
+  const method = (init.method || 'GET').toUpperCase()
+  const attempts = method === 'GET' ? 3 : 1
+  let lastError: unknown
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetchWithErrors(`${getSavedApiBase()}${path}`, { ...init, headers })
+      if (response.status === 204) return undefined as T
+      return response.json() as Promise<T>
+    } catch (error) {
+      lastError = error
+      const retryable = error instanceof ApiError
+        && (error.status === 0 || [500, 502, 503, 504].includes(error.status))
+      if (!retryable || attempt === attempts - 1) throw error
+      await new Promise((resolve) => window.setTimeout(resolve, 300 * (2 ** attempt)))
+    }
+  }
+
+  throw lastError
 }
 
 function jsonBody(value: unknown): string {
@@ -205,6 +224,10 @@ export const api = {
     method: 'POST', body: jsonBody({ title: title || null }),
   }),
   getMessages: (sessionId: string) => request<Message[]>(`/sessions/${encodeURIComponent(sessionId)}/messages`),
+  renameSession: (sessionId: string, title: string | null) => request<Session>(
+    `/sessions/${encodeURIComponent(sessionId)}`,
+    { method: 'PATCH', body: jsonBody({ title: title || null }) },
+  ),
   deleteSession: (sessionId: string) => request<void>(`/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }),
 
   chat: (query: string, sessionId: string | null, scope: KnowledgeScope, signal?: AbortSignal) => request<ChatResponse>('/chat', {
@@ -212,7 +235,48 @@ export const api = {
   }),
   chatStream,
 
-  listDocuments: () => request<DocumentRecord[]>('/documents'),
+  listDocuments: async (params: DocumentListParams = {}, signal?: AbortSignal) => {
+    const query = new URLSearchParams()
+    query.set('page', String(params.page ?? 1))
+    query.set('page_size', String(params.pageSize ?? 20))
+    if (params.search?.trim()) query.set('search', params.search.trim())
+    if (params.scope) query.set('scope', params.scope)
+    if (params.status) query.set('status', params.status)
+    const payload = await request<DocumentPage | DocumentRecord[]>(
+      `/documents?${query.toString()}`,
+      { signal },
+    )
+
+    // 兼容后端滚动升级期间的旧数组响应，避免页面被 undefined 数据击穿。
+    if (Array.isArray(payload)) {
+      const search = params.search?.trim().toLocaleLowerCase() || ''
+      const processing = new Set(['uploaded', 'queued', 'parsing', 'chunking', 'embedding'])
+      const failed = new Set(['failed', 'cleanup_pending'])
+      const filtered = payload.filter((document) => {
+        if (search && !document.filename.toLocaleLowerCase().includes(search)) return false
+        if (params.scope && document.scope !== params.scope) return false
+        if (params.status === 'indexed' && document.status !== 'indexed') return false
+        if (params.status === 'processing' && !processing.has(document.status)) return false
+        if (params.status === 'failed' && !failed.has(document.status)) return false
+        return true
+      })
+      const page = Math.max(1, params.page ?? 1)
+      const pageSize = Math.max(1, params.pageSize ?? 20)
+      const offset = (page - 1) * pageSize
+      return {
+        items: filtered.slice(offset, offset + pageSize),
+        total: filtered.length,
+        page,
+        page_size: pageSize,
+        total_pages: Math.ceil(filtered.length / pageSize),
+      }
+    }
+
+    if (!payload || !Array.isArray(payload.items)) {
+      throw new ApiError('文档列表响应格式异常，请重启后端服务', 502, 'INVALID_DOCUMENT_PAGE')
+    }
+    return payload
+  },
   getDocument: (id: string) => request<DocumentRecord>(`/documents/${encodeURIComponent(id)}`),
   uploadDocument: (file: File, scope: DocumentScope) => {
     const form = new FormData()
@@ -220,8 +284,19 @@ export const api = {
     form.append('scope', scope)
     return request<DocumentUpload>('/documents', { method: 'POST', body: form })
   },
+  uploadDocuments: (files: File[], scope: DocumentScope) => {
+    const form = new FormData()
+    files.forEach((file) => form.append('files', file))
+    form.append('scope', scope)
+    return request<DocumentBatchUpload>('/documents/batch', { method: 'POST', body: form })
+  },
   deleteDocument: (id: string) => request<void>(`/documents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   getTask: (id: string) => request<IndexTask>(`/tasks/${encodeURIComponent(id)}`),
+  getTasks: (ids: string[]) => {
+    const query = new URLSearchParams()
+    ids.forEach((id) => query.append('task_ids', id))
+    return request<IndexTask[]>(`/tasks?${query.toString()}`)
+  },
   downloadDocument: async (id: string, filename: string) => {
     const headers = new Headers()
     const key = getApiKey()

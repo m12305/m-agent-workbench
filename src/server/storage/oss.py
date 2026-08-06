@@ -103,16 +103,15 @@ class AliyunOSSStorage:
         """删除文件 (幂等)"""
         import alibabacloud_oss_v2 as oss
 
-        try:
-            await asyncio.to_thread(
-                self.client.delete_object,
-                oss.DeleteObjectRequest(
-                    bucket=self._bucket_name,
-                    key=key,
-                ),
-            )
-        except Exception:
-            pass  # OSS 删除不存在的对象不会抛异常，但做防御
+        # 删除不存在对象本身是幂等成功；网络/鉴权错误必须向上抛出，
+        # 让摄取补偿流程记录 cleanup_pending 并在启动时重试。
+        await asyncio.to_thread(
+            self.client.delete_object,
+            oss.DeleteObjectRequest(
+                bucket=self._bucket_name,
+                key=key,
+            ),
+        )
 
     async def exists(self, key: str) -> bool:
         """检查文件是否存在"""

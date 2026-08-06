@@ -55,6 +55,10 @@ class CreateSessionRequest(BaseModel):
     title: str | None = Field(default=None, max_length=200)
 
 
+class UpdateSessionRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+
+
 class SessionResponse(BaseModel):
     session_id: str
     title: str | None
@@ -118,6 +122,14 @@ class DocumentResponse(BaseModel):
     updated_at: datetime
 
 
+class DocumentPageResponse(BaseModel):
+    items: list[DocumentResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
 class DocumentUploadResponse(BaseModel):
     document_id: str
     filename: str
@@ -127,6 +139,21 @@ class DocumentUploadResponse(BaseModel):
     status: str
     task_id: str
     created_at: datetime
+
+
+class DocumentBatchUploadItemResponse(BaseModel):
+    filename: str
+    success: bool
+    document: DocumentUploadResponse | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+class DocumentBatchUploadResponse(BaseModel):
+    total: int
+    succeeded: int
+    failed: int
+    results: list[DocumentBatchUploadItemResponse]
 
 
 class TaskResponse(BaseModel):

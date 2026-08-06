@@ -14,10 +14,13 @@ class UnsupportedFormatError(AppError):
 
 class FileTooLargeError(AppError):
     def __init__(self, size: int, max_size: int):
+        size_mb = size / 1024 / 1024
+        max_size_mb = max_size // 1024 // 1024
         super().__init__(
             code="FILE_TOO_LARGE",
-            message=f"文件大小 {size} 超过限制 {max_size}",
+            message=f"文件大小 {size_mb:.1f} MB 超过限制 {max_size_mb} MB",
             status_code=413,
+            details={"size": size, "max_size": max_size},
         )
 
 
@@ -27,6 +30,25 @@ class MimeMismatchError(AppError):
             code="MIME_MISMATCH",
             message=f"文件扩展名 {ext} 与 MIME 类型 {mime} 不一致",
             status_code=400,
+        )
+
+
+class InvalidPdfError(AppError):
+    def __init__(self, message: str = "PDF 文件损坏、已加密或无法读取"):
+        super().__init__(
+            code="INVALID_PDF",
+            message=message,
+            status_code=400,
+        )
+
+
+class PdfPageLimitError(AppError):
+    def __init__(self, page_count: int, max_pages: int):
+        super().__init__(
+            code="PDF_PAGE_LIMIT_EXCEEDED",
+            message=f"PDF 共 {page_count} 页，超过 {max_pages} 页限制",
+            status_code=422,
+            details={"page_count": page_count, "max_pages": max_pages},
         )
 
 

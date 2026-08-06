@@ -16,11 +16,11 @@ ChatAgent — 基于 LangGraph ReAct 的通用对话 Agent
   ┌─────────────────────────────────────────────────┐
   │  短期记忆 (Checkpointer)                          │
   │  - 对话历史，按 thread_id 隔离                    │
-  │  - MemorySaver (内存) / PostgresSaver (持久化)    │
+  │  - MemorySaver / SqliteSaver / PostgresSaver       │
   ├─────────────────────────────────────────────────┤
   │  长期记忆 (Store)                                 │
   │  - 跨会话的用户偏好、事实、知识                     │
-  │  - InMemoryStore (内存) / PostgresStore (持久化)  │
+  │  - InMemoryStore / SqliteStore / PostgresStore      │
   └─────────────────────────────────────────────────┘
 
 使用:
@@ -34,6 +34,12 @@ ChatAgent — 基于 LangGraph ReAct 的通用对话 Agent
     agent.chat("你好，我叫小明", thread_id="user-001")
     agent.chat("我叫什么名字？", thread_id="user-001")  # 会记住
 
+    # SQLite 持久化存储
+    agent = ChatAgent(
+        store_type="sqlite",
+        sqlite_path="./data/chat_agent.db",
+    )
+
     # PostgreSQL 持久化存储
     agent = ChatAgent(
         store_type="postgres",
@@ -46,8 +52,11 @@ ChatAgent — 基于 LangGraph ReAct 的通用对话 Agent
 ===========================================================================
 """
 
+import asyncio
+import sqlite3
 import time
 import uuid
+from pathlib import Path
 from typing import Annotated, TypedDict
 
 from langgraph.graph import StateGraph, END
@@ -109,7 +118,13 @@ class ChatAgent(BaseAgent):
         agent.chat("我叫什么？", thread_id="alice")        # 记得
         agent.chat("你好", thread_id="bob")                 # 独立会话
 
-        # 方式3: PostgreSQL 持久化
+        # 方式3: SQLite 持久化
+        agent = ChatAgent(
+            store_type="sqlite",
+            sqlite_path="./data/chat_agent.db",
+        )
+
+        # 方式4: PostgreSQL 持久化
         agent = ChatAgent(
             name="MyBot",
             store_type="postgres",
@@ -134,9 +149,13 @@ class ChatAgent(BaseAgent):
             custom_tools:       自定义工具列表
 
             --- 存储配置 (替代原来 memory_strategy / max_turns) ---
-            store_type:         存储类型 ("memory" | "postgres", 默认 "memory")
+            store_type:         存储类型 ("memory" | "sqlite" | "postgres",
+                                默认 "memory")
                                 - "memory":  MemorySaver + InMemoryStore (进程内)
+                                - "sqlite":  SqliteSaver + SqliteStore (本地持久化)
                                 - "postgres": PostgresSaver + PostgresStore (持久化)
+            sqlite_path:        SQLite 数据库文件路径
+                                (默认 "./data/chat_agent.db")
             postgres_conn:      PostgreSQL 连接字符串 (store_type="postgres" 时必需)
             thread_id:          默认线程 ID (不指定则自动生成)
 
@@ -179,14 +198,66 @@ class ChatAgent(BaseAgent):
         self.retry_max_delay = kwargs.get("retry_max_delay", 30.0)
 
         # --- 5. 存储配置 (短期记忆 + 长期记忆) ---
-        store_type = kwargs.get("store_type", "memory")
+        store_type = kwargs.get("store_type", "sqlite")
         self.system_prompt = kwargs.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
         self.store_type = store_type
+        self.sqlite_path = None
+        self._sqlite_connections: tuple[sqlite3.Connection, ...] = ()
 
         if store_type == "memory":
             self._checkpointer = MemorySaver()
             self._store = InMemoryStore()
             self.logger.info("📦 使用内存存储 (MemorySaver + InMemoryStore)")
+
+        elif store_type == "sqlite":
+            try:
+                from langgraph.checkpoint.sqlite import SqliteSaver
+                from langgraph.store.sqlite import SqliteStore
+            except ImportError as e:
+                raise ImportError(
+                    "使用 SQLite 存储需要安装: "
+                    "pip install 'langgraph-checkpoint-sqlite>=3.0.1'\n"
+                    f"原始错误: {e}"
+                ) from e
+
+            sqlite_path = kwargs.get("sqlite_path", "./data/chat_agent.db")
+            if not sqlite_path:
+                raise ValueError("store_type='sqlite' 时 sqlite_path 不能为空")
+
+            if str(sqlite_path) == ":memory:":
+                conn_string = ":memory:"
+            else:
+                db_path = Path(sqlite_path).expanduser()
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                conn_string = str(db_path)
+
+            checkpointer_conn = sqlite3.connect(
+                conn_string,
+                check_same_thread=False,
+            )
+            store_conn = None
+            try:
+                store_conn = sqlite3.connect(
+                    conn_string,
+                    check_same_thread=False,
+                    isolation_level=None,
+                )
+                self._checkpointer = SqliteSaver(checkpointer_conn)
+                self._checkpointer.setup()
+                self._store = SqliteStore(store_conn)
+                self._store.setup()
+            except Exception:
+                checkpointer_conn.close()
+                if store_conn is not None:
+                    store_conn.close()
+                raise
+
+            self.sqlite_path = conn_string
+            self._sqlite_connections = (checkpointer_conn, store_conn)
+            self.logger.info(
+                f"🗃️ 使用 SQLite 持久化存储 "
+                f"(SqliteSaver + SqliteStore): {conn_string}"
+            )
 
         elif store_type == "postgres":
             try:
@@ -214,7 +285,8 @@ class ChatAgent(BaseAgent):
 
         else:
             raise ValueError(
-                f"不支持的 store_type: '{store_type}'，可选: memory / postgres"
+                f"不支持的 store_type: '{store_type}'，"
+                "可选: memory / sqlite / postgres"
             )
 
         # --- 6. Agent 配置 ---
@@ -287,12 +359,16 @@ class ChatAgent(BaseAgent):
     # ══════════════════════════════════════════════════════════════
     # 同步对话
     # ══════════════════════════════════════════════════════════════
-    def chat(self, user_input: str, thread_id: str = None) -> str:
+    def chat(
+        self, user_input: str, thread_id: str = None,
+        extra_system_content: str | None = None,
+    ) -> str:
         """与 Agent 对话 (同步)
 
         参数:
             user_input: 用户输入文本
             thread_id:  会话线程 ID (不指定则使用默认的 self._thread_id)
+            extra_system_content: 按请求注入的额外系统上下文
 
         返回:
             Agent 的文本响应
@@ -300,19 +376,28 @@ class ChatAgent(BaseAgent):
         if not self._initialized:
             self.initialize()
         self.logger.info(f"💬 收到: {user_input[:50]}...")
-        response = self._execute(user_input, thread_id=thread_id)
+        response = self._execute(
+            user_input, thread_id=thread_id,
+            extra_system_content=extra_system_content,
+        )
         self.logger.info(f"🤖 回复: {response[:50]}...")
         return response
 
     # ══════════════════════════════════════════════════════════════
     # 核心执行
     # ══════════════════════════════════════════════════════════════
-    def _execute(self, user_input: str, thread_id: str = None) -> str:
+    def _execute(
+        self, user_input: str, thread_id: str = None,
+        extra_system_content: str | None = None,
+    ) -> str:
         """执行 Agent 核心逻辑
 
         参数:
             user_input: 用户输入文本
             thread_id:  会话线程 ID (不指定则使用默认的 self._thread_id)
+            extra_system_content: 按请求注入的额外系统上下文
+                (如知识库检索结果)，作为 SystemMessage 存储，不会
+                出现在用户聊天记录中。
 
         返回:
             Agent 的文本响应
@@ -343,6 +428,18 @@ class ChatAgent(BaseAgent):
             ]
             self.logger.info(f"🆕 新会话: thread_id={tid}")
 
+        # 按请求注入知识库上下文 (在 HumanMessage 之前，确保 LLM 先看到指令)
+        if extra_system_content:
+            messages.insert(-1, SystemMessage(content=extra_system_content))
+
+        # 诊断: 确认存入 checkpointer 的消息结构
+        self.logger.info(
+            "_execute: thread_id=%s msg_count=%d types=%s",
+            tid,
+            len(messages),
+            [type(m).__name__ for m in messages],
+        )
+
         # 执行配置: thread_id + token 计数回调
         config = {
             "configurable": {"thread_id": tid},
@@ -370,7 +467,10 @@ class ChatAgent(BaseAgent):
             self.logger.error(f"❌ Agent 执行错误 (重试 {self.max_retries + 1} 次后): {e}")
             return f"抱歉，处理请求时出错: {e}"
 
-    def chat_stream(self, user_input: str, thread_id: str = None):
+    def chat_stream(
+        self, user_input: str, thread_id: str = None,
+        extra_system_content: str | None = None,
+    ):
         """流式对话 (生成器) — 逐 chunk 返回响应
 
         使用:
@@ -380,6 +480,7 @@ class ChatAgent(BaseAgent):
         参数:
             user_input: 用户输入文本
             thread_id:  会话线程 ID (不指定则使用默认的 self._thread_id)
+            extra_system_content: 按请求注入的额外系统上下文
         """
         if not self._initialized:
             self.initialize()
@@ -403,6 +504,10 @@ class ChatAgent(BaseAgent):
                 HumanMessage(content=user_input),
             ]
             self.logger.info(f"🆕 新会话 (stream): thread_id={tid}")
+
+        # 按请求注入知识库上下文
+        if extra_system_content:
+            messages.insert(-1, SystemMessage(content=extra_system_content))
 
         # 流式调用配置 (带 token 计数回调)
         config = {
@@ -569,18 +674,18 @@ class ChatAgent(BaseAgent):
 
         注意:
             - MemorySaver: 旧状态仍在内存中但不再被引用
-            - PostgresSaver: 可通过 delete_thread() 清理
+            - SqliteSaver / PostgresSaver: 通过 delete_thread() 清理
         """
         tid = thread_id or self._thread_id
 
-        if self.store_type == "postgres":
+        if self.store_type in {"sqlite", "postgres"}:
+            backend_name = "SQLite" if self.store_type == "sqlite" else "Postgres"
             try:
-                # PostgresSaver 支持删除线程
                 if hasattr(self._checkpointer, 'delete_thread'):
                     self._checkpointer.delete_thread(tid)
-                self.logger.info(f"🔄 Postgres 会话已重置: thread_id={tid}")
+                self.logger.info(f"🔄 {backend_name} 会话已重置: thread_id={tid}")
             except Exception as e:
-                self.logger.warning(f"⚠️ Postgres 会话重置失败: {e}")
+                self.logger.warning(f"⚠️ {backend_name} 会话重置失败: {e}")
 
         # 生成新的默认 thread_id
         if thread_id is None:
@@ -600,6 +705,7 @@ class ChatAgent(BaseAgent):
             {
                 "thread_id": str,
                 "store_type": str,
+                "sqlite_path": str,  # 仅 SQLite 存储时提供
                 "message_count": int | None,
                 "has_state": bool,
             }
@@ -613,6 +719,8 @@ class ChatAgent(BaseAgent):
             "message_count": None,
             "has_state": False,
         }
+        if self.store_type == "sqlite":
+            info["sqlite_path"] = self.sqlite_path
 
         if self._graph:
             state = self._graph.get_state(config)
@@ -667,18 +775,29 @@ class ChatAgent(BaseAgent):
     # ══════════════════════════════════════════════════════════════
     # 异步对话 (FastAPI 用)
     # ══════════════════════════════════════════════════════════════
-    async def achat(self, user_input: str, thread_id: str = None) -> str:
+    async def achat(
+        self, user_input: str, thread_id: str = None,
+        extra_system_content: str | None = None,
+    ) -> str:
         """异步对话 — 内部调用 self._graph.ainvoke()
 
         参数:
             user_input: 用户输入文本
             thread_id:  会话线程 ID
+            extra_system_content: 按请求注入的额外系统上下文
 
         返回:
             Agent 的文本响应
         """
         if not self._initialized:
             self.initialize()
+
+        # 同步 SqliteSaver/SqliteStore 不实现 LangGraph 的异步接口。
+        # 放到工作线程中执行同步图，避免阻塞 FastAPI 事件循环。
+        if getattr(self, "store_type", "memory") == "sqlite":
+            return await asyncio.to_thread(
+                self._execute, user_input, thread_id, extra_system_content,
+            )
 
         tid = thread_id or self._thread_id
         config_for_check = {"configurable": {"thread_id": tid}}
@@ -692,6 +811,9 @@ class ChatAgent(BaseAgent):
                 HumanMessage(content=user_input),
             ]
             self.logger.info(f"🆕 新会话 (async): thread_id={tid}")
+
+        if extra_system_content:
+            messages.insert(-1, SystemMessage(content=extra_system_content))
 
         config = {
             "configurable": {"thread_id": tid},
@@ -712,7 +834,10 @@ class ChatAgent(BaseAgent):
             self.logger.error(f"❌ Agent 异步执行错误: {e}")
             return f"抱歉，处理请求时出错: {e}"
 
-    async def achat_stream(self, user_input: str, thread_id: str = None):
+    async def achat_stream(
+        self, user_input: str, thread_id: str = None,
+        extra_system_content: str | None = None,
+    ):
         """异步流式对话，逐模型消息块返回文本。
 
         使用:
@@ -722,9 +847,24 @@ class ChatAgent(BaseAgent):
         参数:
             user_input: 用户输入文本
             thread_id:  会话线程 ID
+            extra_system_content: 按请求注入的额外系统上下文
         """
         if not self._initialized:
             self.initialize()
+
+        if getattr(self, "store_type", "memory") == "sqlite":
+            stream = self.chat_stream(
+                user_input, thread_id=thread_id,
+                extra_system_content=extra_system_content,
+            )
+            while True:
+                has_chunk, chunk = await asyncio.to_thread(
+                    self._next_stream_chunk,
+                    stream,
+                )
+                if not has_chunk:
+                    return
+                yield chunk
 
         tid = thread_id or self._thread_id
 
@@ -743,6 +883,17 @@ class ChatAgent(BaseAgent):
                 HumanMessage(content=user_input),
             ]
             self.logger.info(f"🆕 新会话 (async stream): thread_id={tid}")
+
+        if extra_system_content:
+            messages.insert(-1, SystemMessage(content=extra_system_content))
+
+        # 诊断: 确认存入 checkpointer 的消息结构
+        self.logger.info(
+            "achat_stream: thread_id=%s msg_count=%d types=%s",
+            tid,
+            len(messages),
+            [type(m).__name__ for m in messages],
+        )
 
         config = {
             "configurable": {"thread_id": tid},
@@ -770,6 +921,14 @@ class ChatAgent(BaseAgent):
             yield f"抱歉，处理请求时出错: {e}"
 
     @staticmethod
+    def _next_stream_chunk(stream) -> tuple[bool, str | None]:
+        """从同步流中取一块，避免 StopIteration 跨越 Future 边界。"""
+        try:
+            return True, next(stream)
+        except StopIteration:
+            return False, None
+
+    @staticmethod
     def _message_chunk_text(content) -> str:
         """从不同 Provider 的消息块结构中提取可展示文本。"""
         if isinstance(content, str):
@@ -784,6 +943,16 @@ class ChatAgent(BaseAgent):
             elif isinstance(block, dict) and isinstance(block.get("text"), str):
                 parts.append(block["text"])
         return "".join(parts)
+
+    def close(self) -> None:
+        """关闭 ChatAgent 持有的 SQLite 连接。"""
+        connections = getattr(self, "_sqlite_connections", ())
+        self._sqlite_connections = ()
+        for connection in connections:
+            try:
+                connection.close()
+            except sqlite3.Error as e:
+                self.logger.warning(f"⚠️ 关闭 SQLite 连接失败: {e}")
 
     # ══════════════════════════════════════════════════════════════
     # 兜底

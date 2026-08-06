@@ -14,10 +14,43 @@ _test_keys: dict[str, str] = {}
 
 
 @pytest_asyncio.fixture
-async def client() -> AsyncIterator[AsyncClient]:
+async def client(tmp_path, monkeypatch) -> AsyncIterator[AsyncClient]:
+    monkeypatch.setenv("STORAGE_BACKEND", "local")
+    monkeypatch.setenv("STORAGE_LOCAL_DIR", str(tmp_path / "files"))
+    monkeypatch.setenv("BAILIAN_API_KEY", "")
+    monkeypatch.setenv("MILVUS_HOST", "")
+    monkeypatch.setenv("MINERU_API_KEY", "")
+
     from src.server.main import app
+    from src.server.documents.service import DocumentService
+    from src.server.repositories.memory import (
+        InMemoryChunkRepo,
+        InMemoryDocumentRepo,
+        InMemoryTaskRepo,
+    )
+    from src.server.storage.local import LocalStorage
+    from src.server.tasks.in_process import InProcessTaskQueue
+
+    class TestTaskWorker:
+        async def execute(self, document_id: str, task_id: str | None = None) -> None:
+            return None
+
+        async def get_document_status(self, document_id: str) -> str | None:
+            return "queued"
 
     async with LifespanManager(app) as manager:
+        storage = LocalStorage(str(tmp_path / "files"))
+        task_queue = InProcessTaskQueue(TestTaskWorker(), InMemoryTaskRepo())
+        app.state.storage = storage
+        app.state.task_queue = task_queue
+        app.state.doc_service = DocumentService(
+            doc_repo=InMemoryDocumentRepo(),
+            chunk_repo=InMemoryChunkRepo(),
+            storage=storage,
+            task_queue=task_queue,
+            milvus_client=None,
+        )
+
         auth_service = app.state.auth_service
         admin = await auth_service.create_user("Test Admin", "admin")
         user = await auth_service.create_user("Test User", "user")

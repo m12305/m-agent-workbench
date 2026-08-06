@@ -82,6 +82,24 @@ export interface DocumentRecord {
   updated_at: string
 }
 
+export type DocumentStatusFilter = 'indexed' | 'processing' | 'failed'
+
+export interface DocumentListParams {
+  page?: number
+  pageSize?: number
+  search?: string
+  scope?: DocumentScope
+  status?: DocumentStatusFilter
+}
+
+export interface DocumentPage {
+  items: DocumentRecord[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+}
+
 export interface DocumentUpload {
   document_id: string
   filename: string
@@ -91,6 +109,21 @@ export interface DocumentUpload {
   status: string
   task_id: string
   created_at: string
+}
+
+export interface DocumentBatchUploadItem {
+  filename: string
+  success: boolean
+  document: DocumentUpload | null
+  error_code: string | null
+  error_message: string | null
+}
+
+export interface DocumentBatchUpload {
+  total: number
+  succeeded: number
+  failed: number
+  results: DocumentBatchUploadItem[]
 }
 
 export interface IndexTask {

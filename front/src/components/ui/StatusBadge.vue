@@ -24,6 +24,7 @@ const labels: Record<string, string> = {
   parsing: '解析中',
   chunking: '分块中',
   embedding: '向量化',
+  cleanup_pending: '失败待清理',
   failed: '失败',
   error: '异常',
   unconfigured: '未配置',
@@ -38,9 +39,8 @@ const statusLabel = computed(() => labels[props.status] || props.status)
 const toneClass = computed(() => {
   if (['ok', 'connected', 'indexed', 'done', 'active'].includes(props.status)) return 'is-good'
   if (['queued', 'uploaded', 'parsing', 'chunking', 'embedding'].includes(props.status)) return 'is-progress'
-  if (['failed', 'error', 'revoked'].includes(props.status)) return 'is-bad'
+  if (['failed', 'cleanup_pending', 'error', 'revoked'].includes(props.status)) return 'is-bad'
   if (props.status === 'shared') return 'is-accent'
   return 'is-neutral'
 })
 </script>
-

@@ -45,6 +45,32 @@ load_dotenv()
 logger = logging.getLogger("server")
 
 
+def configure_logging() -> None:
+    """Configure application logs even when the process already owns handlers.
+
+    ``logging.basicConfig`` is intentionally a no-op when an IDE, Uvicorn, or a
+    test runner has installed a root handler.  Setting the application logger's
+    level explicitly keeps ``server.*`` INFO records visible in those hosts.
+    """
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    # ── 确保 root logger level 不至于阻挡子 logger 的 INFO 日志传播 ──
+    # basicConfig 在 root 已有 handler 时是 no-op，不会改写 root level，
+    # 但 root level 默认 WARNING，会导致 server.* 的 INFO 日志在
+    # 传播到 root 时被静默丢弃，所以这里显式降级。
+    root = logging.getLogger()
+    if root.level > level:
+        root.setLevel(level)
+    application_logger = logging.getLogger("server")
+    application_logger.setLevel(level)
+    application_logger.disabled = False
+
+
 # ═══════════════════════════════════════════════════════════════
 # Lifespan
 # ═══════════════════════════════════════════════════════════════
@@ -53,11 +79,7 @@ logger = logging.getLogger("server")
 async def lifespan(app: FastAPI):
     """应用生命周期 — 初始化/清理服务"""
     # Startup
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    configure_logging()
 
     # ── 仓库 (SQLite 持久化 / 内存回退) ──
     repo_backend = os.getenv("REPOSITORY_BACKEND", "sqlite").lower()
@@ -124,14 +146,14 @@ async def lifespan(app: FastAPI):
     retrieval = None
     rewrite_llm = None
     if embedding and milvus:
-        retrieval = RetrievalService(embedding, milvus)
+        retrieval = RetrievalService(embedding, milvus, doc_repo)
         logger.info("基础检索服务已启用")
 
         # ── Query 改写 LLM (用于高阶检索) ──
         rewrite_model = os.getenv("REWRITE_MODEL", "")
         if rewrite_model:
             try:
-                from models import get_model, CAN_RUN
+                from ..models import get_model, CAN_RUN
                 if CAN_RUN:
                     rewrite_llm = get_model(
                         temperature=0.1,
@@ -207,7 +229,11 @@ async def lifespan(app: FastAPI):
             embedding_service=embedding,
             milvus_client=milvus,
         )
-        task_queue = InProcessTaskQueue(worker=task_worker, task_repo=task_repo)
+        task_queue = InProcessTaskQueue(
+            worker=task_worker,
+            task_repo=task_repo,
+            max_concurrency=int(os.getenv("DOCUMENT_TASK_CONCURRENCY", "2")),
+        )
         doc_service = DocumentService(
             doc_repo=doc_repo, chunk_repo=chunk_repo,
             storage=storage, task_queue=task_queue,
@@ -243,14 +269,20 @@ async def lifespan(app: FastAPI):
                 "on" if milvus else "off",
                 "on" if retrieval else "off")
 
-    yield
+    if task_queue:
+        await task_queue.recover()
 
-    # Shutdown
-    if milvus:
-        milvus.disconnect()
-    if sqlite_db:
-        await sqlite_db.close()
-    logger.info("🛑 FastAPI 服务已关闭")
+    try:
+        yield
+    finally:
+        # 先停止接收并等待后台任务，再关闭它们依赖的 Milvus/SQLite。
+        if task_queue:
+            await task_queue.close()
+        if milvus:
+            milvus.disconnect()
+        if sqlite_db:
+            await sqlite_db.close()
+        logger.info("🛑 FastAPI 服务已关闭")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -264,10 +296,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── 中间件 (顺序: CORS → 日志 → 认证) ──
-setup_cors(app)
-app.add_middleware(LoggingMiddleware)
+# Starlette 后注册的中间件位于外层，因此按内层到外层注册。
 app.add_middleware(AuthMiddleware)
+app.add_middleware(LoggingMiddleware)
+setup_cors(app)
 
 
 # ── 异常处理 ──

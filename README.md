@@ -157,11 +157,17 @@ npm run dev        # http://localhost:5173
 | 方法 | 端点 | 说明 |
 |------|------|------|
 | `POST` | `/api/v1/documents` | 上传文档 (multipart) |
-| `GET` | `/api/v1/documents` | 文档列表 |
+| `POST` | `/api/v1/documents/batch` | 批量上传文档，逐文件返回处理结果 |
+| `GET` | `/api/v1/documents` | 分页文档列表，支持搜索、范围和状态筛选 |
 | `GET` | `/api/v1/documents/{id}` | 文档详情 |
 | `GET` | `/api/v1/documents/{id}/download` | 下载原始文件 |
 | `DELETE` | `/api/v1/documents/{id}` | 删除文档 |
 | `GET` | `/api/v1/tasks/{id}` | 索引任务进度 |
+| `GET` | `/api/v1/tasks?task_ids=...` | 批量查询索引任务进度 |
+
+文档列表参数：`page`（默认 1）、`page_size`（默认 20，最大 100）、`search`、
+`scope=private|shared`、`status=indexed|processing|failed`。响应包含
+`items`、`total`、`page`、`page_size` 和 `total_pages`。
 
 ### 健康检查
 
@@ -199,13 +205,18 @@ npm run dev        # http://localhost:5173
 
 ```
 Upload → Storage (OSS/Local)
+     → Bounded TaskQueue
      → TaskWorker
          → Parser (Text/Markdown/PDF/MinerU)
          → Chunker
          → Bailian Embedding (text-embedding-v4 / qwen3.7-text-embedding)
          → Milvus Insert (with Partition Key)
-         → SQLite ChunkRecord
+         → SQLite Transaction (ChunkRecord + Document + Task)
 ```
+
+文档摄取采用补偿式事务：解析和向量化不会占用长时间数据库事务；Milvus 写入后，
+Chunk、文档状态和任务状态由 `aiosqlite` 在固定连接上一次提交。任一步失败会清理
+已写入的向量、Chunk 和暂存原文件，服务重启时会恢复未完成任务。
 
 ### 存储后端
 
@@ -213,6 +224,8 @@ Upload → Storage (OSS/Local)
 |------|------|------|
 | `REPOSITORY_BACKEND` | `sqlite` / `memory` | `sqlite` |
 | `STORAGE_SQLITE_DIR` | 路径 | `./data` |
+| `DOCUMENT_TASK_CONCURRENCY` | 正整数 | `2` |
+| `LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` | `INFO` |
 | `STORAGE_BACKEND` | `local` / `oss` | `local` |
 | `STORAGE_LOCAL_DIR` | 路径 | `./storage/files` |
 

@@ -1,12 +1,11 @@
 """SQLite 持久化存储实现
 
 每个 Repository 对应 SQLite 中的一张表，通过 SqliteDb 统一管理连接。
-所有数据库操作通过 asyncio.to_thread 在后台线程执行，避免阻塞事件循环。
+普通操作使用独立 aiosqlite 短连接；事务在一个固定连接中完成。
 
 数据库文件路径通过 STORAGE_SQLITE_DIR 环境变量配置，默认 ./data/mka.db。
 """
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -14,6 +13,9 @@ import os
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Awaitable, Callable, TypeVar
+
+import aiosqlite
 
 from .base import (
     User, ApiKey, Session, Identity,
@@ -21,6 +23,7 @@ from .base import (
 )
 
 logger = logging.getLogger("server.sqlite_repos")
+T = TypeVar("T")
 
 # ── 默认 SQLite 数据库路径 ──
 DEFAULT_DB_PATH = os.path.join(
@@ -39,14 +42,17 @@ class SqliteDb:
     特性:
       - WAL 模式 (高并发读写)
       - 自动创建目录和表结构
-      - 通过 asyncio.to_thread 实现异步
-      - check_same_thread=False 支持多线程访问
+      - 普通操作使用独立 aiosqlite 连接，避免共享连接并发误用
+      - WAL + busy_timeout 支持多连接读写
+      - 事务期间固定使用同一连接
     """
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self._db_path = db_path
-        self._conn: "sqlite3.Connection | None" = None
+        self._memory_uri: str | None = None
+        self._keeper: aiosqlite.Connection | None = None
         self._initialized = False
+        self._closed = False
 
     @property
     def db_path(self) -> str:
@@ -54,78 +60,125 @@ class SqliteDb:
 
     # ── 连接生命周期 ──
 
-    def _get_conn(self):
-        """获取底层 sqlite3 连接 (同步, 在 to_thread 内调用)"""
-        import sqlite3
+    async def _connect(self) -> aiosqlite.Connection:
+        if self._closed:
+            raise RuntimeError("SQLite 数据库已经关闭")
 
-        if self._conn is None:
-            Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA foreign_keys=ON")
-        return self._conn
+        db_path = self._memory_uri or self._db_path
+        conn = await aiosqlite.connect(
+            db_path,
+            timeout=5.0,
+            uri=self._memory_uri is not None,
+        )
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA foreign_keys=ON")
+        await conn.execute("PRAGMA busy_timeout=5000")
+        return conn
 
     async def init_schema(self) -> None:
         """创建所有表 (幂等)"""
-        def _init():
-            conn = self._get_conn()
-            conn.executescript(SCHEMA_SQL)
-            conn.executescript(LEGACY_STATIC_KEY_MIGRATION_SQL)
-            conn.commit()
-        await asyncio.to_thread(_init)
+        self._closed = False
+        if self._db_path == ":memory:":
+            self._memory_uri = f"file:mka-{uuid.uuid4()}?mode=memory&cache=shared"
+            self._keeper = await self._connect()
+            conn = self._keeper
+        else:
+            Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+            conn = await self._connect()
+
+        try:
+            await conn.execute("PRAGMA journal_mode=WAL")
+            await conn.executescript(SCHEMA_SQL)
+            await conn.executescript(LEGACY_STATIC_KEY_MIGRATION_SQL)
+            await conn.commit()
+        finally:
+            if conn is not self._keeper:
+                await conn.close()
         self._initialized = True
 
     async def close(self) -> None:
         """关闭数据库连接"""
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
-            self._initialized = False
+        self._closed = True
+        if self._keeper is not None:
+            await self._keeper.close()
+            self._keeper = None
+        self._initialized = False
 
     # ── 通用查询方法 ──
 
     async def execute(self, sql: str, params: tuple | list | None = None) -> None:
         """执行写入 SQL (INSERT / UPDATE / DELETE)"""
-        def _run():
-            conn = self._get_conn()
-            conn.execute(sql, params or [])
-            conn.commit()
-        await asyncio.to_thread(_run)
+        conn = await self._connect()
+        try:
+            await conn.execute(sql, params or [])
+            await conn.commit()
+        finally:
+            await conn.close()
 
     async def executemany(self, sql: str, params_list: list) -> None:
         """批量执行写入 SQL"""
         if not params_list:
             return
-        def _run():
-            conn = self._get_conn()
-            conn.executemany(sql, params_list)
-            conn.commit()
-        await asyncio.to_thread(_run)
+        conn = await self._connect()
+        try:
+            await conn.executemany(sql, params_list)
+            await conn.commit()
+        finally:
+            await conn.close()
 
     async def fetchall(self, sql: str, params: tuple | list | None = None) -> list[dict]:
         """查询多条记录, 返回 dict 列表"""
-        def _run():
-            conn = self._get_conn()
-            rows = conn.execute(sql, params or []).fetchall()
+        conn = await self._connect()
+        try:
+            cursor = await conn.execute(sql, params or [])
+            rows = await cursor.fetchall()
+            await cursor.close()
             return [dict(r) for r in rows]
-        return await asyncio.to_thread(_run)
+        finally:
+            await conn.close()
 
     async def fetchone(self, sql: str, params: tuple | list | None = None) -> dict | None:
         """查询单条记录, 返回 dict 或 None"""
-        def _run():
-            conn = self._get_conn()
-            row = conn.execute(sql, params or []).fetchone()
+        conn = await self._connect()
+        try:
+            cursor = await conn.execute(sql, params or [])
+            row = await cursor.fetchone()
+            await cursor.close()
             return dict(row) if row else None
-        return await asyncio.to_thread(_run)
+        finally:
+            await conn.close()
 
     async def fetchval(self, sql: str, params: tuple | list | None = None):
         """查询单个值 (第一行第一列)"""
-        def _run():
-            conn = self._get_conn()
-            row = conn.execute(sql, params or []).fetchone()
+        conn = await self._connect()
+        try:
+            cursor = await conn.execute(sql, params or [])
+            row = await cursor.fetchone()
+            await cursor.close()
             return row[0] if row else None
-        return await asyncio.to_thread(_run)
+        finally:
+            await conn.close()
+
+    async def transaction(
+        self,
+        operation: Callable[[aiosqlite.Connection], Awaitable[T]],
+    ) -> T:
+        """在一个固定连接和一个短事务中执行异步操作。
+
+        operation 应直接使用传入连接，不得另开连接。
+        解析、Embedding、Milvus 等耗时或外部操作也不得放入这里。
+        """
+        conn = await self._connect()
+        try:
+            await conn.execute("BEGIN IMMEDIATE")
+            result = await operation(conn)
+            await conn.commit()
+            return result
+        except BaseException:
+            await conn.rollback()
+            raise
+        finally:
+            await conn.close()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -172,6 +225,9 @@ CREATE TABLE IF NOT EXISTS documents (
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_documents_user_updated
+ON documents(user_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS chunks (
     chunk_id     TEXT PRIMARY KEY,
@@ -486,12 +542,60 @@ class SqliteDocumentRepo:
             return None
         return self._row_to_doc(row)
 
+    async def get_many(self, document_ids: list[str]) -> list[Document]:
+        if not document_ids:
+            return []
+        placeholders = ", ".join("?" for _ in document_ids)
+        rows = await self._db.fetchall(
+            f"SELECT * FROM documents WHERE document_id IN ({placeholders})",
+            tuple(document_ids),
+        )
+        by_id = {row["document_id"]: self._row_to_doc(row) for row in rows}
+        return [by_id[doc_id] for doc_id in document_ids if doc_id in by_id]
+
     async def list_by_user(self, user_id: str) -> list[Document]:
         rows = await self._db.fetchall(
             "SELECT * FROM documents WHERE user_id = ? ORDER BY updated_at DESC",
             (user_id,),
         )
         return [self._row_to_doc(r) for r in rows]
+
+    async def list_by_user_paginated(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+        search: str | None = None,
+        scope: str | None = None,
+        statuses: list[str] | None = None,
+    ) -> tuple[list[Document], int]:
+        clauses = ["user_id = ?"]
+        params: list = [user_id]
+
+        if search:
+            clauses.append("instr(lower(filename), lower(?)) > 0")
+            params.append(search)
+        if scope:
+            clauses.append("scope = ?")
+            params.append(scope)
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(statuses)
+
+        where_clause = " AND ".join(clauses)
+        count_row = await self._db.fetchone(
+            f"SELECT COUNT(*) AS total FROM documents WHERE {where_clause}",
+            tuple(params),
+        )
+        total = int(count_row["total"]) if count_row else 0
+        rows = await self._db.fetchall(
+            f"SELECT * FROM documents WHERE {where_clause} "
+            "ORDER BY updated_at DESC, document_id DESC LIMIT ? OFFSET ?",
+            tuple([*params, limit, offset]),
+        )
+        return [self._row_to_doc(row) for row in rows], total
 
     async def update(self, document_id: str, **kwargs) -> Document | None:
         """根据 kwargs 动态构建 UPDATE 语句
@@ -566,6 +670,82 @@ class SqliteChunkRepo:
             rows,
         )
 
+    async def commit_index(
+        self,
+        document_id: str,
+        chunks: list[ChunkRecord],
+        task_id: str | None = None,
+    ) -> None:
+        """原子替换 Chunk，并将文档（及任务）标记为完成。"""
+        now = _now()
+        rows = [
+            (c.chunk_id, c.document_id, c.user_id,
+             c.chunk_index, c.chunk_hash, c.text,
+             c.page_start, c.page_end,
+             _json_list(c.sections), _json_dict(c.metadata),
+             now)
+            for c in chunks
+        ]
+
+        async def _commit(conn: aiosqlite.Connection) -> None:
+            await conn.execute(
+                "DELETE FROM chunks WHERE document_id = ?", (document_id,),
+            )
+            if rows:
+                await conn.executemany(
+                    "INSERT INTO chunks (chunk_id, document_id, user_id, "
+                    "chunk_index, chunk_hash, text, page_start, page_end, "
+                    "sections, metadata, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+            cursor = await conn.execute(
+                "UPDATE documents SET status = 'indexed', chunk_count = ?, "
+                "error_message = NULL, updated_at = ? WHERE document_id = ?",
+                (len(chunks), now, document_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"文档不存在: {document_id}")
+            await cursor.close()
+            if task_id:
+                await conn.execute(
+                    "UPDATE tasks SET status = 'done', progress = 1.0, "
+                    "error_message = NULL, updated_at = ? WHERE task_id = ?",
+                    (now, task_id),
+                )
+
+        await self._db.transaction(_commit)
+
+    async def fail_index(
+        self,
+        document_id: str,
+        task_id: str | None,
+        error_message: str,
+        document_status: str = "failed",
+    ) -> None:
+        """原子清理 SQLite 中间结果，并记录失败状态。"""
+        if document_status not in {"failed", "cleanup_pending"}:
+            raise ValueError(f"无效的文档失败状态: {document_status}")
+        now = _now()
+
+        async def _fail(conn: aiosqlite.Connection) -> None:
+            await conn.execute(
+                "DELETE FROM chunks WHERE document_id = ?", (document_id,),
+            )
+            await conn.execute(
+                "UPDATE documents SET status = ?, chunk_count = 0, "
+                "error_message = ?, updated_at = ? WHERE document_id = ?",
+                (document_status, error_message, now, document_id),
+            )
+            if task_id:
+                await conn.execute(
+                    "UPDATE tasks SET status = 'failed', progress = 0.0, "
+                    "error_message = ?, updated_at = ? WHERE task_id = ?",
+                    (error_message, now, task_id),
+                )
+
+        await self._db.transaction(_fail)
+
     async def get_by_document(self, document_id: str) -> list[ChunkRecord]:
         rows = await self._db.fetchall(
             "SELECT * FROM chunks WHERE document_id = ? ORDER BY chunk_index",
@@ -634,10 +814,50 @@ class SqliteTaskRepo:
             updated_at=_parse_dt(row["updated_at"]),
         )
 
+    async def get_many(self, task_ids: list[str]) -> list[TaskRecord]:
+        if not task_ids:
+            return []
+        placeholders = ", ".join("?" for _ in task_ids)
+        rows = await self._db.fetchall(
+            f"SELECT * FROM tasks WHERE task_id IN ({placeholders})",
+            tuple(task_ids),
+        )
+        by_id = {
+            row["task_id"]: TaskRecord(
+                task_id=row["task_id"], document_id=row["document_id"],
+                status=row["status"], progress=row["progress"],
+                error_message=row["error_message"],
+                created_at=_parse_dt(row["created_at"]),
+                updated_at=_parse_dt(row["updated_at"]),
+            )
+            for row in rows
+        }
+        return [by_id[task_id] for task_id in task_ids if task_id in by_id]
+
     async def list_by_document(self, document_id: str) -> list[TaskRecord]:
         rows = await self._db.fetchall(
             "SELECT * FROM tasks WHERE document_id = ? ORDER BY created_at DESC",
             (document_id,),
+        )
+        return [
+            TaskRecord(
+                task_id=r["task_id"], document_id=r["document_id"],
+                status=r["status"], progress=r["progress"],
+                error_message=r["error_message"],
+                created_at=_parse_dt(r["created_at"]),
+                updated_at=_parse_dt(r["updated_at"]),
+            )
+            for r in rows
+        ]
+
+    async def list_incomplete(self) -> list[TaskRecord]:
+        rows = await self._db.fetchall(
+            "SELECT task.* FROM tasks AS task "
+            "LEFT JOIN documents AS document "
+            "ON document.document_id = task.document_id "
+            "WHERE task.status NOT IN ('done', 'failed') "
+            "OR document.status IN ('indexed', 'cleanup_pending') "
+            "ORDER BY task.created_at",
         )
         return [
             TaskRecord(

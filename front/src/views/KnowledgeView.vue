@@ -10,10 +10,10 @@
     </PageHeader>
 
     <section class="knowledge-overview" aria-label="知识库概览">
-      <div><span class="overview-icon"><Files :size="21" /></span><dl><dt>全部文档</dt><dd>{{ store.documents.length }}</dd></dl></div>
-      <div><span class="overview-icon"><CheckCircle :size="21" /></span><dl><dt>可检索</dt><dd>{{ indexedCount }}</dd></dl></div>
-      <div><span class="overview-icon"><Stack :size="21" /></span><dl><dt>内容分块</dt><dd>{{ totalChunks }}</dd></dl></div>
-      <div><span class="overview-icon"><HardDrives :size="21" /></span><dl><dt>存储用量</dt><dd>{{ formatSize(totalSize) }}</dd></dl></div>
+      <div><span class="overview-icon"><Files :size="21" /></span><dl><dt>{{ hasFilters ? '匹配文档' : '全部文档' }}</dt><dd>{{ store.documentsTotal }}</dd></dl></div>
+      <div><span class="overview-icon"><CheckCircle :size="21" /></span><dl><dt>本页可检索</dt><dd>{{ indexedCount }}</dd></dl></div>
+      <div><span class="overview-icon"><Stack :size="21" /></span><dl><dt>本页内容分块</dt><dd>{{ totalChunks }}</dd></dl></div>
+      <div><span class="overview-icon"><HardDrives :size="21" /></span><dl><dt>本页存储用量</dt><dd>{{ formatSize(totalSize) }}</dd></dl></div>
     </section>
 
     <section
@@ -27,7 +27,7 @@
     >
       <input ref="fileInput" type="file" multiple hidden accept=".txt,.md,.pdf,text/plain,text/markdown,application/pdf" @change="onFilesSelected" />
       <div class="dropzone-icon"><CloudArrowUp :size="28" weight="duotone" /></div>
-      <div><strong>{{ uploading ? '正在上传并创建索引任务' : '拖放文件到这里' }}</strong><span>支持 TXT、Markdown、PDF，单个文件不超过 20 MB</span></div>
+      <div><strong>{{ uploading ? '正在批量上传并创建索引任务' : '拖放文件到这里' }}</strong><span>支持多选 TXT、Markdown、PDF，单个文件不超过 {{ MAX_UPLOAD_SIZE_MB }} MB，PDF 不超过 200 页</span></div>
       <label class="scope-control" @click.stop>
         <span>存储范围</span>
         <select v-model="uploadScope" :disabled="!store.isAdmin || uploading">
@@ -42,12 +42,22 @@
         <FileText :size="19" aria-hidden="true" />
         <span><strong>{{ item.name }}</strong><small>{{ item.message }}</small></span>
         <StatusBadge :status="item.status" :label="item.status === 'done' ? '已提交' : item.status === 'failed' ? '失败' : '上传中'" />
+        <button
+          v-if="item.status === 'failed'"
+          class="icon-button quiet danger-icon upload-queue-dismiss"
+          type="button"
+          :aria-label="`移除 ${item.name} 的失败提示`"
+          title="移除提示"
+          @click="removeUploadItem(item.id)"
+        >
+          <X :size="16" weight="bold" aria-hidden="true" />
+        </button>
       </div>
     </div>
 
     <section class="content-section document-section">
       <div class="section-toolbar">
-        <div class="section-title"><h2>文档</h2><span>{{ filteredDocuments.length }} 项</span></div>
+        <div class="section-title"><h2>文档</h2><span>{{ store.documentsTotal }} 项</span></div>
         <div class="document-filters">
           <label class="search-field wide"><MagnifyingGlass :size="17" /><input v-model="search" type="search" placeholder="搜索文件名" aria-label="搜索文档" /></label>
           <select v-model="scopeFilter" class="toolbar-select" aria-label="按范围筛选">
@@ -64,17 +74,17 @@
         <button type="button" @click="refresh">重试</button>
       </div>
 
-      <div v-if="store.documentsLoading && !store.documents.length" class="document-skeleton">
+      <div v-if="store.documentsLoading && !pageDocuments.length" class="document-skeleton">
         <span v-for="index in 5" :key="index"></span>
       </div>
-      <EmptyState v-else-if="!filteredDocuments.length" :icon="FileSearch" :title="store.documents.length ? '没有匹配的文档' : '知识库还是空的'" :description="store.documents.length ? '调整搜索词或筛选条件。' : '上传第一份资料，索引完成后即可在对话中检索。'">
-        <button v-if="!store.documents.length" class="button secondary" type="button" @click="openPicker"><UploadSimple :size="18" /> 选择文件</button>
+      <EmptyState v-else-if="!pageDocuments.length" :icon="FileSearch" :title="hasFilters ? '没有匹配的文档' : '知识库还是空的'" :description="hasFilters ? '调整搜索词或筛选条件。' : '上传第一份资料，索引完成后即可在对话中检索。'">
+        <button v-if="!hasFilters" class="button secondary" type="button" @click="openPicker"><UploadSimple :size="18" /> 选择文件</button>
       </EmptyState>
       <div v-else class="document-table-wrap">
         <table class="document-table">
           <thead><tr><th>文档</th><th>范围</th><th>状态</th><th>分块</th><th>更新于</th><th><span class="sr-only">操作</span></th></tr></thead>
           <tbody>
-            <tr v-for="document in filteredDocuments" :key="document.document_id" @click="showDocument(document)">
+            <tr v-for="document in pageDocuments" :key="document.document_id" @click="showDocument(document)">
               <td><div class="file-cell"><span class="file-icon"><FilePdf v-if="document.filename.toLowerCase().endsWith('.pdf')" :size="21" /><MarkdownLogo v-else-if="document.filename.toLowerCase().endsWith('.md')" :size="21" /><FileText v-else :size="21" /></span><span><strong>{{ document.filename }}</strong><small>{{ formatSize(document.file_size) }} · {{ document.mime_type }}</small></span></div></td>
               <td><StatusBadge :status="document.scope" /></td>
               <td><StatusBadge :status="taskStatus(document)" :show-dot="isProcessing(document.status)" /></td>
@@ -84,6 +94,19 @@
             </tr>
           </tbody>
         </table>
+      </div>
+      <div v-if="store.documentsTotal > 0" class="document-pagination" aria-label="文档分页">
+        <span class="pagination-summary">第 {{ store.documentsPage }} / {{ store.documentsTotalPages }} 页</span>
+        <label class="page-size-control">
+          <span>每页</span>
+          <select :value="store.documentsPageSize" :disabled="store.documentsLoading" @change="changePageSize">
+            <option :value="10">10</option>
+            <option :value="20">20</option>
+            <option :value="50">50</option>
+          </select>
+        </label>
+        <button class="button secondary pagination-button" type="button" :disabled="store.documentsLoading || store.documentsPage <= 1" @click="goToPage(store.documentsPage - 1)"><CaretLeft :size="16" /> 上一页</button>
+        <button class="button secondary pagination-button" type="button" :disabled="store.documentsLoading || store.documentsPage >= store.documentsTotalPages" @click="goToPage(store.documentsPage + 1)">下一页 <CaretRight :size="16" /></button>
       </div>
     </section>
 
@@ -113,11 +136,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { PhArrowClockwise as ArrowClockwise, PhCheckCircle as CheckCircle, PhCloudArrowUp as CloudArrowUp, PhCopy as Copy, PhDotsThree as DotsThree, PhDownloadSimple as DownloadSimple, PhFilePdf as FilePdf, PhFileSearch as FileSearch, PhFiles as Files, PhFileText as FileText, PhHardDrives as HardDrives, PhMagnifyingGlass as MagnifyingGlass, PhMarkdownLogo as MarkdownLogo, PhStack as Stack, PhTrash as Trash, PhUploadSimple as UploadSimple, PhWarningCircle as WarningCircle } from '@phosphor-icons/vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { PhArrowClockwise as ArrowClockwise, PhCaretLeft as CaretLeft, PhCaretRight as CaretRight, PhCheckCircle as CheckCircle, PhCloudArrowUp as CloudArrowUp, PhCopy as Copy, PhDotsThree as DotsThree, PhDownloadSimple as DownloadSimple, PhFilePdf as FilePdf, PhFileSearch as FileSearch, PhFiles as Files, PhFileText as FileText, PhHardDrives as HardDrives, PhMagnifyingGlass as MagnifyingGlass, PhMarkdownLogo as MarkdownLogo, PhStack as Stack, PhTrash as Trash, PhUploadSimple as UploadSimple, PhWarningCircle as WarningCircle, PhX as X } from '@phosphor-icons/vue'
 import { api } from '../api/client'
 import { useAppStore } from '../stores/app'
-import type { DocumentRecord, DocumentScope } from '../types/api'
+import type { DocumentRecord, DocumentScope, DocumentStatusFilter } from '../types/api'
 import PageHeader from '../components/layout/PageHeader.vue'
 import BaseModal from '../components/feedback/BaseModal.vue'
 import ConfirmDialog from '../components/feedback/ConfirmDialog.vue'
@@ -126,6 +149,9 @@ import StatusBadge from '../components/ui/StatusBadge.vue'
 
 interface UploadQueueItem { id: number; name: string; status: 'queued' | 'done' | 'failed'; message: string }
 
+const MAX_UPLOAD_SIZE_MB = 200
+const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
 const store = useAppStore()
 const fileInput = ref<HTMLInputElement | null>(null)
 const uploadScope = ref<DocumentScope>('private')
@@ -133,61 +159,88 @@ const dragover = ref(false)
 const dragDepth = ref(0)
 const uploading = ref(false)
 const uploadQueue = ref<UploadQueueItem[]>([])
-const search = ref('')
-const scopeFilter = ref('all')
-const statusFilter = ref('all')
+const search = ref(store.documentsSearch || '')
+const scopeFilter = ref<'all' | DocumentScope>(store.documentsScopeFilter || 'all')
+const statusFilter = ref<'all' | DocumentStatusFilter>(store.documentsStatusFilter || 'all')
 const selectedDocument = ref<DocumentRecord | null>(null)
 const documentToDelete = ref<DocumentRecord | null>(null)
 const detailLoading = ref(false)
 const deleting = ref(false)
 
-const indexedCount = computed(() => store.documents.filter((item) => item.status === 'indexed').length)
-const totalChunks = computed(() => store.documents.reduce((total, item) => total + item.chunk_count, 0))
-const totalSize = computed(() => store.documents.reduce((total, item) => total + item.file_size, 0))
-const filteredDocuments = computed(() => store.documents.filter((document) => {
-  const matchesSearch = document.filename.toLowerCase().includes(search.value.trim().toLowerCase())
-  const matchesScope = scopeFilter.value === 'all' || document.scope === scopeFilter.value
-  const matchesStatus = statusFilter.value === 'all'
-    || (statusFilter.value === 'processing' && isProcessing(document.status))
-    || document.status === statusFilter.value
-  return matchesSearch && matchesScope && matchesStatus
-}))
+const pageDocuments = computed(() => Array.isArray(store.documents) ? store.documents : [])
+const indexedCount = computed(() => pageDocuments.value.filter((item) => item.status === 'indexed').length)
+const totalChunks = computed(() => pageDocuments.value.reduce((total, item) => total + item.chunk_count, 0))
+const totalSize = computed(() => pageDocuments.value.reduce((total, item) => total + item.file_size, 0))
+const hasFilters = computed(() => Boolean(search.value.trim()) || scopeFilter.value !== 'all' || statusFilter.value !== 'all')
 
-onMounted(() => { if (!store.documents.length) void store.loadDocuments() })
+let searchTimer: number | undefined
+
+watch(search, (value) => {
+  store.documentsSearch = value.trim()
+  window.clearTimeout(searchTimer)
+  searchTimer = window.setTimeout(() => {
+    void store.loadDocuments(false, { page: 1 }).catch(() => undefined)
+  }, 300)
+})
+
+watch([scopeFilter, statusFilter], ([scope, status]) => {
+  window.clearTimeout(searchTimer)
+  store.documentsScopeFilter = scope === 'all' ? '' : scope
+  store.documentsStatusFilter = status === 'all' ? '' : status
+  void store.loadDocuments(false, { page: 1 }).catch(() => undefined)
+})
+
+onMounted(() => { if (!pageDocuments.value.length) void store.loadDocuments() })
+onBeforeUnmount(() => window.clearTimeout(searchTimer))
 
 function openPicker() { if (!uploading.value) fileInput.value?.click() }
 function onDragEnter() { dragDepth.value += 1; dragover.value = true }
 function onDragLeave() { dragDepth.value = Math.max(0, dragDepth.value - 1); if (!dragDepth.value) dragover.value = false }
 function onDrop(event: DragEvent) { dragover.value = false; dragDepth.value = 0; void uploadFiles(Array.from(event.dataTransfer?.files || [])) }
 function onFilesSelected(event: Event) { void uploadFiles(Array.from((event.target as HTMLInputElement).files || [])); (event.target as HTMLInputElement).value = '' }
+function removeUploadItem(id: number) { uploadQueue.value = uploadQueue.value.filter((item) => item.id !== id) }
 
 async function uploadFiles(files: File[]) {
   if (!files.length || uploading.value) return
-  const supported = files.filter((file) => /\.(txt|md|pdf)$/i.test(file.name) && file.size <= 20 * 1024 * 1024)
-  if (supported.length !== files.length) store.notify('部分文件未加入队列', '仅支持 TXT、Markdown、PDF，且单个文件不能超过 20 MB。', 'error')
+  const supported = files.filter((file) => /\.(txt|md|pdf)$/i.test(file.name) && file.size <= MAX_UPLOAD_SIZE_BYTES)
+  if (supported.length !== files.length) store.notify('部分文件未加入队列', `仅支持 TXT、Markdown、PDF，且单个文件不能超过 ${MAX_UPLOAD_SIZE_MB} MB。`, 'error')
   if (!supported.length) return
   uploading.value = true
   const queue: UploadQueueItem[] = supported.map((file, index) => ({ id: Date.now() + index, name: file.name, status: 'queued', message: '等待上传' }))
   uploadQueue.value.push(...queue)
-  for (let index = 0; index < supported.length; index += 1) {
-    const file = supported[index]
-    const item = queue[index]
-    if (!file || !item) continue
-    item.message = '正在发送文件'
-    try {
-      await store.uploadDocument(file, uploadScope.value)
-      item.status = 'done'
-      item.message = '已创建索引任务'
-    } catch (error) {
+  queue.forEach((item) => { item.message = '正在批量发送' })
+  try {
+    const response = await store.uploadDocuments(supported, uploadScope.value)
+    queue.forEach((item, index) => {
+      const result = response.results[index]
+      if (result?.success && result.document) {
+        item.status = 'done'
+        item.message = '已创建索引任务'
+      } else {
+        item.status = 'failed'
+        item.message = result?.error_message || '服务未返回该文件的处理结果'
+      }
+    })
+  } catch (error) {
+    queue.forEach((item) => {
       item.status = 'failed'
       item.message = error instanceof Error ? error.message : '上传失败'
-    }
+    })
+  } finally {
+    uploading.value = false
   }
-  uploading.value = false
   window.setTimeout(() => { uploadQueue.value = uploadQueue.value.filter((item) => item.status !== 'done') }, 5000)
 }
 
 async function refresh() { await store.loadDocuments().catch(() => undefined) }
+async function goToPage(page: number) {
+  if (page < 1 || page > store.documentsTotalPages || page === store.documentsPage) return
+  await store.loadDocuments(false, { page }).catch(() => undefined)
+}
+async function changePageSize(event: Event) {
+  const pageSize = Number((event.target as HTMLSelectElement).value)
+  await store.loadDocuments(false, { page: 1, pageSize }).catch(() => undefined)
+}
 function isProcessing(status: string) { return ['uploaded', 'queued', 'parsing', 'chunking', 'embedding'].includes(status) }
 function taskStatus(document: DocumentRecord) { return store.tasks[document.document_id]?.status || document.status }
 

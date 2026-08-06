@@ -1,9 +1,18 @@
 """问答服务 — ChatAgent 异步包装 + 知识库检索 + Query 改写 + 多用户管理"""
 
 import logging
+import re
+from langchain_core.messages import AIMessage, HumanMessage
+
 from ...agents import ChatAgent
 
 logger = logging.getLogger("server.chat_service")
+
+_KNOWLEDGE_INSTRUCTION = (
+    "请根据以下知识库内容回答用户问题。如果知识库内容不足以回答，请如实说明。"
+)
+_KNOWLEDGE_HEADER = "--- 知识库检索结果 ---"
+_LEGACY_QUERY_MARKER = re.compile(r"\r?\n---\r?\n用户问题:\s*")
 
 
 class ChatService:
@@ -36,6 +45,39 @@ class ChatService:
             logger.info("新 Agent 实例: user=%s", user_id[:8])
         return self._agents[user_id]
 
+    @staticmethod
+    def _legacy_user_content(content: object) -> str:
+        """从旧版检索增强消息中还原用户的原始问题。"""
+        if not isinstance(content, str):
+            return str(content)
+
+        normalized = content.lstrip()
+        query_markers = list(_LEGACY_QUERY_MARKER.finditer(normalized))
+        is_legacy_enhanced_query = (
+            normalized.startswith(_KNOWLEDGE_INSTRUCTION)
+            and _KNOWLEDGE_HEADER in normalized
+            and query_markers
+        )
+        if not is_legacy_enhanced_query:
+            return content
+
+        return normalized[query_markers[-1].end():].strip()
+
+    @classmethod
+    def visible_messages(cls, messages: list) -> list:
+        """过滤系统/工具消息，并兼容清理旧版污染的用户消息。"""
+        visible = []
+        for message in messages:
+            if isinstance(message, HumanMessage):
+                content = cls._legacy_user_content(message.content)
+                if content == message.content:
+                    visible.append(message)
+                else:
+                    visible.append(HumanMessage(content=content))
+            elif isinstance(message, AIMessage):
+                visible.append(message)
+        return visible
+
     def _get_session_messages(
         self, user_id: str, session_id: str, max_rounds: int = 6,
     ) -> list:
@@ -63,7 +105,10 @@ class ChatService:
 
             config = {"configurable": {"thread_id": tid}}
             state = agent._graph.get_state(config)
-            messages = state.values.get("messages", []) if state.values else []
+            stored_messages = (
+                state.values.get("messages", []) if state.values else []
+            )
+            messages = self.visible_messages(stored_messages)
 
             # 只取最近 max_rounds * 2 条 (user + assistant 各算一条)
             max_messages = max_rounds * 2
@@ -78,38 +123,46 @@ class ChatService:
         self, user_id: str, session_id: str, query: str, scope: str = "hybrid"
     ) -> str:
         """同步问答 — 先检索知识库，再调用 ChatAgent"""
-        enhanced_query = await self._build_query(
+        context = await self._get_knowledge_context(
             query, scope, user_id, session_id,
         )
         agent = self._get_or_create_agent(user_id)
         tid = self._make_tid(user_id, session_id)
-        return await agent.achat(enhanced_query, thread_id=tid)
+        return await agent.achat(
+            query, thread_id=tid, extra_system_content=context,
+        )
 
     async def chat_stream(
         self, user_id: str, session_id: str, query: str, scope: str = "hybrid"
     ):
         """SSE 流式问答 — 先检索知识库，再流式输出"""
-        enhanced_query = await self._build_query(
+        context = await self._get_knowledge_context(
             query, scope, user_id, session_id,
         )
         agent = self._get_or_create_agent(user_id)
         tid = self._make_tid(user_id, session_id)
-        async for chunk in agent.achat_stream(enhanced_query, thread_id=tid):
+        logger.info(
+            "chat_stream: query=%r context_injected=%s",
+            query[:80], "yes" if context else "no",
+        )
+        async for chunk in agent.achat_stream(
+            query, thread_id=tid, extra_system_content=context,
+        ):
             yield chunk
 
-    async def _build_query(
+    async def _get_knowledge_context(
         self, query: str, scope: str, user_id: str, session_id: str = "",
-    ) -> str:
-        """构建增强查询: 用户问题 + 知识库检索结果。
+    ) -> str | None:
+        """获取知识库检索上下文，用于注入 SystemMessage。
 
-        1. 提取会话上下文 (用于 query 改写)
-        2. 调用检索服务 (基本检索或高级改写检索)
-        3. 格式化检索结果为上下文注入 prompt
+        与 _build_query 不同，这里只返回检索到的知识内容 +
+        指令提示词，不包含用户原始问题。返回 None 表示无需注入。
 
-        如果没有配置检索服务，直接返回原 query。
+        检索结果注入为 SystemMessage 而非 HumanMessage，确保
+        会话历史中只展示用户原始问题。
         """
         if not self._retrieval:
-            return query
+            return None
 
         try:
             # 提取会话消息 (用于上下文改写)
@@ -121,7 +174,6 @@ class ChatService:
             from .advanced_retrieval import AdvancedRetrievalService
 
             if isinstance(self._retrieval, AdvancedRetrievalService):
-                # 高阶检索: 传递 messages 用于 query 改写
                 hits = await self._retrieval.search(
                     query=query,
                     scope=scope,
@@ -129,7 +181,6 @@ class ChatService:
                     messages=messages,
                 )
             else:
-                # 基础检索
                 hits = await self._retrieval.search(
                     query=query,
                     scope=scope,
@@ -138,20 +189,17 @@ class ChatService:
 
             if not hits:
                 logger.debug("检索无结果: scope=%s", scope)
-                return query
+                return None
 
             from .retrieval_service import RetrievalService
             context = RetrievalService.format_context(hits)
-            enhanced = (
-                f"请根据以下知识库内容回答用户问题。如果知识库内容不足以回答，"
-                f"请如实说明。\n\n"
-                f"{context}\n"
-                f"---\n"
-                f"用户问题: {query}"
-            )
-            logger.debug("检索增强: hits=%d, chars=%d", len(hits), len(enhanced))
-            return enhanced
+            # 只返回检索上下文 + 指令，不包含用户原始问题。
+            # 用户原始问题通过 HumanMessage 独立存储，确保聊天历史
+            # 中不会出现提示词。
+            system_context = f"{_KNOWLEDGE_INSTRUCTION}\n\n{context}"
+            logger.debug("检索增强: hits=%d, chars=%d", len(hits), len(system_context))
+            return system_context
 
         except Exception as e:
             logger.warning("检索失败，降级为普通对话: %s", e)
-            return query
+            return None
