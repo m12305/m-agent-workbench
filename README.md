@@ -57,7 +57,13 @@ m-agent-workbench/
 │
 ├── webui/index.html               # 单文件测试控制台 (纯 HTML/JS)
 ├── .env.example                   # 环境变量模板
-└── requirements.txt               # Python 依赖
+├── requirements.txt               # Python 依赖
+├── Dockerfile.backend             # FastAPI 后端镜像
+├── Dockerfile.nginx               # 多阶段构建: Vue 编译 → Nginx
+├── nginx.conf                     # Nginx 反向代理配置
+├── docker-compose.yml             # Docker Compose 编排
+├── .dockerignore                  # Docker 构建忽略规则
+└── DEPLOY.md                      # 部署详细指南
 ```
 
 ---
@@ -116,6 +122,73 @@ npm run dev        # http://localhost:5173
 ```bash
 # 浏览器打开 webui/index.html
 ```
+
+---
+
+## Docker Compose 部署（生产环境）
+
+适用于将项目部署到远程服务器，Milvus 已独立部署的场景。
+
+### 架构
+
+```
+Port 9090 (宿主机)
+       │
+  ┌────▼─────────┐
+  │   Nginx      │  ← 前端静态文件 + API 反向代理
+  └────┬─────────┘
+       │ /api, /health → http://backend:8000
+  ┌────▼─────────┐
+  │   Backend    │  ← FastAPI + Uvicorn
+  └────┬─────────┘
+       │
+       ├── SQLite (Docker volume)
+       ├── 文件存储 (Docker volume)
+       └── Milvus (外部独立部署)
+```
+
+### 部署步骤
+
+```bash
+# 1. Clone 项目
+git clone <repo-url> /opt/agent-workbench
+cd /opt/agent-workbench
+
+# 2. 配置环境变量
+cp .env.example .env
+vim .env   # 填入 LLM Key、BAILIAN_API_KEY、MILVUS_HOST 等
+
+# 3. 构建并启动
+sudo docker compose up -d --build
+
+# 4. 初始化管理员 (API Key 只显示一次!)
+sudo docker compose exec backend python -m src.server.bootstrap_admin --name Administrator
+
+# 5. 浏览器访问
+# http://<服务器IP>:9090
+```
+
+### 环境变量要点
+
+| 变量 | 说明 |
+|------|------|
+| `DEEPSEEK_API_KEY` | LLM API Key（至少配置一个） |
+| `BAILIAN_API_KEY` | 阿里云百炼 Embedding |
+| `MILVUS_HOST` | Milvus 地址（**不能用 localhost**，容器内无法访问宿主机 localhost） |
+| `MILVUS_PORT` | Milvus 端口（默认 19530） |
+
+> **注意**: Milvus 在宿主机时，`MILVUS_HOST` 请填写宿主机实际 IP（如 `192.168.x.x`），容器内的 `localhost` 指向容器自身而非宿主机。
+
+### 常用运维命令
+
+```bash
+sudo docker compose logs -f backend   # 查看后端日志
+sudo docker compose restart           # 重启所有服务
+sudo docker compose down              # 停止并删除容器（数据保留）
+sudo docker compose up -d --build     # 更新后重新构建
+```
+
+> 详细部署文档见 [DEPLOY.md](DEPLOY.md)
 
 ---
 
