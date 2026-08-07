@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+.pytest_cache/
+.superpowers/
+
+# Git
+.git/
+.gitignore
+
+# Env (use docker-compose env_file instead)
+.env
+.env.example
+
+# Node
+front/node_modules/
+front/dist/
+
+# Tests
+tests/
+test.sh
+
+# Docs / Design
+docs/
+design.md
+images/
+
+# Misc
+webui/
+README.md
+
+# Data / Storage (use volumes)
+data/
+storage/
