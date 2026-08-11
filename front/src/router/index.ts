@@ -7,6 +7,7 @@ import AgentHubView from '../views/AgentHubView.vue'
 import ChatView from '../views/ChatView.vue'
 import ConnectView from '../views/ConnectView.vue'
 import KnowledgeView from '../views/KnowledgeView.vue'
+import MultiAgentView from '../views/MultiAgentView.vue'
 import SystemView from '../views/SystemView.vue'
 
 const router = createRouter({
@@ -21,6 +22,7 @@ const router = createRouter({
         { path: '', redirect: { name: 'agents' } },
         { path: 'apps', name: 'agents', component: AgentHubView },
         { path: 'apps/chat/:sessionId?', name: 'chat', component: ChatView, props: true },
+        { path: 'apps/multi-agent', name: 'multi-agent', component: MultiAgentView },
         { path: 'knowledge', name: 'knowledge', component: KnowledgeView },
         { path: 'admin', name: 'admin', component: AdminView, meta: { adminOnly: true } },
         { path: 'system', name: 'system', component: SystemView },

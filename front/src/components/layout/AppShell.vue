@@ -59,7 +59,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { PhBooks as Books, PhChatCircleDots as ChatCircleDots, PhGridFour as GridFour, PhList as List, PhPulse as Pulse, PhSignOut as SignOut, PhUsersThree as UsersThree } from '@phosphor-icons/vue'
+import { PhBooks as Books, PhChatCircleDots as ChatCircleDots, PhGraph as Graph, PhGridFour as GridFour, PhList as List, PhPulse as Pulse, PhSignOut as SignOut, PhUsersThree as UsersThree } from '@phosphor-icons/vue'
 import { useAppStore } from '../../stores/app'
 
 const store = useAppStore()
@@ -69,6 +69,7 @@ const mobileOpen = ref(false)
 const primaryNav = [
   { name: 'agents', label: 'Agent 应用', shortLabel: '应用', icon: GridFour },
   { name: 'chat', label: 'Chat Agent', shortLabel: '对话', icon: ChatCircleDots },
+  { name: 'multi-agent', label: 'Multi-Agent', shortLabel: '协作', icon: Graph },
   { name: 'knowledge', label: '知识库', shortLabel: '知识', icon: Books },
 ]
 const mobileNav = computed(() => [...primaryNav, { name: 'system', label: '系统状态', shortLabel: '状态', icon: Pulse }])

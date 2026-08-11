@@ -1,4 +1,7 @@
-import { PhChatCircleDots as ChatCircleDots } from '@phosphor-icons/vue'
+import {
+  PhChatCircleDots as ChatCircleDots,
+  PhGraph as GraphIcon,
+} from '@phosphor-icons/vue'
 import type { Component } from 'vue'
 
 export interface AgentDefinition {
@@ -20,5 +23,14 @@ export const agents: AgentDefinition[] = [
     routeName: 'chat',
     icon: ChatCircleDots,
     capabilities: ['多轮会话', '流式回答', 'RAG 检索'],
+  },
+  {
+    id: 'multi-agent',
+    name: 'Multi-Agent',
+    shortName: '多智能体',
+    description: '层级 Plan-and-Solve 编排：主智能体规划调度，子智能体分工执行。',
+    routeName: 'multi-agent',
+    icon: GraphIcon,
+    capabilities: ['任务编排', '多Agent协作', '分级规划执行'],
   },
 ]

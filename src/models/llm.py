@@ -43,12 +43,12 @@ logger = get_logger(__name__)
 # ══════════════════════════════════════════════════════════════════
 PROVIDER_CONFIG = {
     "openai": {
-        "name": "DeepSeek-v4-pro",
+        "name": "ChatGPT",
         "env_key": "OPENAI_API_KEY",
-        "default_model": "deepseek-v4-pro",
+        "default_model": "ChatGPT-4o",
         "module": "langchain_openai",
         "class": "ChatOpenAI",
-        "base_url": "https://api.deepseek.com",  # 使用官方默认
+        "base_url": None,  # 使用官方默认
     },
     "deepseek": {
         "name": "DeepSeek",

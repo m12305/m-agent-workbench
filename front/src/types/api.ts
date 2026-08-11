@@ -138,7 +138,7 @@ export interface IndexTask {
 
 export interface ReadyHealth {
   status: string
-  checks: Record<'chat_agent' | 'embedding' | 'milvus' | 'retrieval', string>
+  checks: Record<'chat_agent' | 'multi_agent' | 'embedding' | 'milvus' | 'retrieval', string>
 }
 
 export interface LiveHealth {

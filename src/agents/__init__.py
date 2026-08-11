@@ -7,5 +7,20 @@
 """
 from .base import BaseAgent
 from .chat_agent import ChatAgent
+from .multi_agent import (
+    MainAgentState, SubAgentState,
+    PlanStep, SubStep, TaskAnalysis,
+    DelegationRequest, SubAgentResult, SynthesisResult,
+    MultiAgentEvent, EVENT_SCHEMAS,
+    SubAgentRegistry, SubAgentMeta,
+)
 
-__all__ = ["BaseAgent", "ChatAgent"]
+__all__ = [
+    "BaseAgent", "ChatAgent",
+    # Multi-agent
+    "MainAgentState", "SubAgentState",
+    "PlanStep", "SubStep", "TaskAnalysis",
+    "DelegationRequest", "SubAgentResult", "SynthesisResult",
+    "MultiAgentEvent", "EVENT_SCHEMAS",
+    "SubAgentRegistry", "SubAgentMeta",
+]

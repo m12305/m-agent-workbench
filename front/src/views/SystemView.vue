@@ -9,7 +9,7 @@
 
     <section class="health-banner" :class="overallHealthy ? 'is-healthy' : 'is-partial'">
       <div class="health-banner-icon"><CheckCircle v-if="overallHealthy" :size="28" weight="fill" /><WarningCircle v-else :size="28" weight="fill" /></div>
-      <div><h2>{{ overallHealthy ? '核心服务运行正常' : '部分能力尚未配置' }}</h2><p>{{ overallHealthy ? 'Agent、检索和知识索引均已就绪。' : '基础对话仍可使用，未配置的依赖会限制 RAG 或文档索引。' }}</p></div>
+      <div><h2>{{ overallHealthy ? '核心服务运行正常' : '部分能力尚未配置' }}</h2><p>{{ overallHealthy ? 'Agent 编排、检索和知识索引均已就绪。' : '基础对话仍可使用，未配置的依赖会限制 RAG 或文档索引。' }}</p></div>
       <span v-if="lastChecked">检查于 {{ lastChecked }}</span>
     </section>
 
@@ -60,7 +60,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { PhArrowClockwise as ArrowClockwise, PhArrowUpRight as ArrowUpRight, PhBookOpenText as BookOpenText, PhCaretRight as CaretRight, PhChatsCircle as ChatsCircle, PhCheckCircle as CheckCircle, PhCpu as Cpu, PhDatabase as Database, PhFiles as Files, PhFingerprint as Fingerprint, PhMagnifyingGlass as MagnifyingGlass, PhSlidersHorizontal as SlidersHorizontal, PhWarningCircle as WarningCircle } from '@phosphor-icons/vue'
+import { PhArrowClockwise as ArrowClockwise, PhArrowUpRight as ArrowUpRight, PhBookOpenText as BookOpenText, PhCaretRight as CaretRight, PhChatsCircle as ChatsCircle, PhCheckCircle as CheckCircle, PhCpu as Cpu, PhDatabase as Database, PhFiles as Files, PhFingerprint as Fingerprint, PhGraph as Graph, PhMagnifyingGlass as MagnifyingGlass, PhSlidersHorizontal as SlidersHorizontal, PhWarningCircle as WarningCircle } from '@phosphor-icons/vue'
 import { api } from '../api/client'
 import { useAppStore } from '../stores/app'
 import PageHeader from '../components/layout/PageHeader.vue'
@@ -78,12 +78,13 @@ const settingsError = ref('')
 const savingSettings = ref(false)
 
 const services = computed(() => {
-  const checks = store.health?.checks || { chat_agent: 'unknown', embedding: 'unknown', milvus: 'unknown', retrieval: 'unknown' }
+  const checks = store.health?.checks
   return [
-    { key: 'chat_agent', label: 'Chat Agent', description: '语言模型与 Agent 执行器', status: checks.chat_agent, icon: Cpu },
-    { key: 'embedding', label: 'Embedding', description: '文档和查询向量化', status: checks.embedding, icon: MagnifyingGlass },
-    { key: 'milvus', label: 'Milvus', description: '向量数据存储与搜索', status: checks.milvus, icon: Database },
-    { key: 'retrieval', label: 'Retrieval', description: 'RAG 检索增强服务', status: checks.retrieval, icon: Files },
+    { key: 'chat_agent', label: 'Chat Agent', description: '语言模型与 Agent 执行器', status: checks?.chat_agent || 'unknown', icon: Cpu },
+    { key: 'multi_agent', label: 'Multi-Agent', description: 'Plan-and-Solve 规划与协作执行', status: checks?.multi_agent || 'unknown', icon: Graph },
+    { key: 'embedding', label: 'Embedding', description: '文档和查询向量化', status: checks?.embedding || 'unknown', icon: MagnifyingGlass },
+    { key: 'milvus', label: 'Milvus', description: '向量数据存储与搜索', status: checks?.milvus || 'unknown', icon: Database },
+    { key: 'retrieval', label: 'Retrieval', description: 'RAG 检索增强服务', status: checks?.retrieval || 'unknown', icon: Files },
   ]
 })
 const overallHealthy = computed(() => liveStatus.value === 'ok' && services.value.every((service) => service.status === 'ok'))

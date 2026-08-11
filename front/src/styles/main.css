@@ -501,7 +501,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   .mobile-topbar { height: 58px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; z-index: 20; }
   .mobile-brand { display: inline-flex; align-items: center; gap: 8px; font-size: 0.8rem; font-weight: 720; }
   .mobile-avatar { width: 32px; height: 32px; border-radius: 9px; }
-  .mobile-navigation { height: 66px; display: grid; grid-template-columns: repeat(4, 1fr); position: fixed; left: 0; right: 0; bottom: 0; z-index: 24; padding: 6px 7px max(6px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 94%, transparent); backdrop-filter: blur(14px); }
+  .mobile-navigation { height: 66px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); position: fixed; left: 0; right: 0; bottom: 0; z-index: 24; padding: 6px 7px max(6px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 94%, transparent); backdrop-filter: blur(14px); }
   .mobile-navigation a { min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border-radius: var(--radius-sm); color: var(--text-muted); font-size: 0.58rem; }
   .mobile-navigation a.router-link-active { color: var(--accent); background: var(--accent-soft); }
   .page-scroll { height: auto; min-height: calc(100dvh - 124px); padding: 25px 16px 38px; }

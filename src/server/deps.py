@@ -42,3 +42,8 @@ def get_session_service(request: Request):
 def get_chat_service(request: Request):
     """获取 ChatService"""
     return request.app.state.chat_service
+
+
+def get_multi_agent_service(request: Request):
+    """获取 MultiAgentService"""
+    return request.app.state.multi_agent_service

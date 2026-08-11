@@ -90,23 +90,13 @@ text_translator = StructuredTool.from_function(
 # ══════════════════════════════════════════════════════════════════
 # 内置工具集
 # ══════════════════════════════════════════════════════════════════
-BUILTIN_TOOLS = [get_current_time, calculator, text_translator]
+BUILTIN_TOOLS = [get_current_time]
 
 # 工具元数据 (用于 ToolRegistry)
 BUILTIN_TOOLS_META = {
     "get_current_time": {
         "category": "utility",
         "tags": ["时间", "日期", "工具"],
-        "version": "1.0.0",
-    },
-    "calculator": {
-        "category": "utility",
-        "tags": ["计算", "数学", "工具"],
-        "version": "1.0.0",
-    },
-    "text_translator": {
-        "category": "language",
-        "tags": ["翻译", "语言", "文本"],
         "version": "1.0.0",
     },
 }
