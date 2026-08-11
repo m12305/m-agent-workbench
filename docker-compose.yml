@@ -1,105 +1,63 @@
-# ═══════════════════════════════════════════════════════════════════════════
-# m-agent-workbench Docker Compose
+# ============================================================================
+# m-knowledge-assistant — Docker Compose 部署
+# ============================================================================
+# 前置条件:
+#   - Milvus 已独立部署，配置 MILVUS_HOST / MILVUS_PORT 指向实际地址
+#   - 复制 .env.example 为 .env 并填入 API Keys
 #
-# 启动全部服务:
-#   docker compose up -d
+# 启动:
+#   docker compose up -d --build
 #
-# Milvus 由用户手动管理，配置 MILVUS_HOST 指向已运行的实例。
-# 不配置 MILVUS_HOST 时，backend 以纯 LLM 对话模式运行。
-# ═══════════════════════════════════════════════════════════════════════════
+# 初始化管理员:
+#   docker compose exec backend python -m src.server.bootstrap_admin --name Administrator
+# ============================================================================
 
 services:
-
-  # ═══════════════════════════════════════════════════════════════════════
-  # FastAPI 后端
-  # ═══════════════════════════════════════════════════════════════════════
   backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    image: m-agent-workbench-backend:latest
+    image: mka-backend:latest
     container_name: mka-backend
     restart: unless-stopped
-    environment:
-      # ── LLM Provider (至少配置一个) ──
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      # ── Embedding (可选, 不配则无索引) ──
-      - BAILIAN_API_KEY=${BAILIAN_API_KEY:-}
-      - BAILIAN_WORKSPACE_ID=${BAILIAN_WORKSPACE_ID:-}
-      - BAILIAN_REGION=${BAILIAN_REGION:-cn-beijing}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-v4}
-      - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-1024}
-      # ── Milvus (可选, 不配则以纯 LLM 对话模式运行) ──
-      - MILVUS_HOST=${MILVUS_HOST:-}
-      - MILVUS_PORT=${MILVUS_PORT:-19530}
-      - MILVUS_USER=${MILVUS_USER:-}
-      - MILVUS_PASSWORD=${MILVUS_PASSWORD:-}
-      - MILVUS_VECTOR_DIM=${MILVUS_VECTOR_DIM:-1024}
-      # ── 存储 ──
-      - REPOSITORY_BACKEND=${REPOSITORY_BACKEND:-sqlite}
-      - STORAGE_SQLITE_DIR=${STORAGE_SQLITE_DIR:-/app/data}
-      - STORAGE_BACKEND=${STORAGE_BACKEND:-local}
-      - STORAGE_LOCAL_DIR=${STORAGE_LOCAL_DIR:-/app/storage/files}
-      # ── 文档解析 (可选) ──
-      - MINERU_API_KEY=${MINERU_API_KEY:-}
-      - MINERU_API_URL=${MINERU_API_URL:-}
-      - MINERU_MODEL_VERSION=${MINERU_MODEL_VERSION:-vlm}
-      - MINERU_LANGUAGE=${MINERU_LANGUAGE:-ch}
-      - MINERU_AGENT_API_URL=${MINERU_AGENT_API_URL:-}
-      # ── 高阶检索 (可选) ──
-      - REWRITE_MODEL=${REWRITE_MODEL:-}
-      # ── 服务调优 ──
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - DOCUMENT_TASK_CONCURRENCY=${DOCUMENT_TASK_CONCURRENCY:-2}
-      - UVICORN_WORKERS=${UVICORN_WORKERS:-1}
+    env_file:
+      - .env
     volumes:
       - mka_data:/app/data
       - mka_storage:/app/storage/files
-    ports:
-      - "${BACKEND_PORT:-8000}:8000"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
     networks:
-      - mka-net
+      - mka_net
+    depends_on: []
+    # 健康检查
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
-  # ═══════════════════════════════════════════════════════════════════════
-  # Nginx 前端 + 反向代理
-  # ═══════════════════════════════════════════════════════════════════════
   nginx:
     build:
       context: .
-      dockerfile: Dockerfile.frontend
-    image: m-agent-workbench-frontend:latest
+      dockerfile: Dockerfile.nginx
+    image: mka-nginx:latest
     container_name: mka-nginx
     restart: unless-stopped
     ports:
-      - "${NGINX_PORT:-80}:80"
+      - "9090:80"
+    networks:
+      - mka_net
     depends_on:
       backend:
         condition: service_healthy
-    networks:
-      - mka-net
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Volumes
-# ═══════════════════════════════════════════════════════════════════════════
 volumes:
   mka_data:
-    driver: local
+    name: mka_data
   mka_storage:
-    driver: local
+    name: mka_storage
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Networks
-# ═══════════════════════════════════════════════════════════════════════════
 networks:
-  mka-net:
+  mka_net:
+    name: mka_net
     driver: bridge
