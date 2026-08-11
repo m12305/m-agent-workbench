@@ -1,0 +1,42 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+*.egg-info
+venv/
+.venv/
+env/
+
+# Node
+front/node_modules
+front/dist
+
+# Runtime data (will be mounted as volumes)
+data/
+storage/
+
+# IDE
+.vscode/
+.idea/
+
+# Docs/images
+*.md
+docs/
+images/
+
+# Tests
+tests/
+test.sh
+
+# Env files
+.env
+.env.example
+
+# Docker
+.dockerignore

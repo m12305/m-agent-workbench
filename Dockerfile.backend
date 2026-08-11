@@ -1,0 +1,39 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Stage 1 — build dependencies
+# ═══════════════════════════════════════════════════════════════════════════
+FROM python:3.12-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Stage 2 — production runtime
+# ═══════════════════════════════════════════════════════════════════════════
+FROM python:3.12-slim
+
+# libmagic1 → python-magic MIME 检测
+# curl       → healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libmagic1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /root/.local /root/.local
+ENV PATH=/root/.local/bin:$PATH
+
+WORKDIR /app
+
+# Application code
+COPY src/ ./src/
+COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Runtime directories (volumes will be mounted here)
+RUN mkdir -p /app/data /app/storage/files
+
+VOLUME ["/app/data", "/app/storage/files"]
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health/live || exit 1
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

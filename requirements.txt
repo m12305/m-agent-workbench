@@ -11,7 +11,7 @@ langgraph
 # 模型 Provider (按需安装)
 langchain-openai
 langchain-deepseek
-langchain-anthropic
+#langchain-anthropic
 
 # 环境与工具
 python-dotenv>=1.0.0
