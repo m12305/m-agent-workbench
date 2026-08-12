@@ -322,6 +322,7 @@ const copied = ref(false)
 const runStartedAt = ref(0)
 const shouldAutoScroll = ref(true)
 const activeController = ref<AbortController | null>(null)
+const activeSessionId = ref('')
 let eventSequence = 0
 let copyTimer: number | undefined
 
@@ -586,6 +587,16 @@ function resetRun() {
 }
 
 function stopRun() {
+  const sessionId = activeSessionId.value
+  if (sessionId) {
+    const headers = new Headers()
+    const apiKey = localStorage.getItem(STORAGE_KEYS.apiKey)
+    if (apiKey) headers.set('Authorization', `Bearer ${apiKey}`)
+    void fetch(
+      `${getSavedApiBase()}/multi-agent/chat/${encodeURIComponent(sessionId)}/cancel`,
+      { method: 'POST', headers },
+    ).catch(() => undefined)
+  }
   activeController.value?.abort()
 }
 
@@ -607,6 +618,7 @@ async function submitTask() {
   currentTask.value = query
   taskInput.value = ''
   events.value = []
+  activeSessionId.value = ''
   runStartedAt.value = Date.now()
   shouldAutoScroll.value = true
   copied.value = false
@@ -657,6 +669,11 @@ async function submitTask() {
         const parsed = parseSseFrame(frame)
         if (!parsed) continue
         pushEvent(parsed.type, parsed.data)
+        if (parsed.type === 'start') {
+          activeSessionId.value = typeof parsed.data.session_id === 'string'
+            ? parsed.data.session_id
+            : ''
+        }
         if (parsed.type === 'done' || parsed.type === 'error') {
           terminalEventReceived = true
           break
@@ -670,6 +687,11 @@ async function submitTask() {
       const parsed = parseSseFrame(buffer)
       if (parsed) {
         pushEvent(parsed.type, parsed.data)
+        if (parsed.type === 'start') {
+          activeSessionId.value = typeof parsed.data.session_id === 'string'
+            ? parsed.data.session_id
+            : ''
+        }
         terminalEventReceived = parsed.type === 'done' || parsed.type === 'error'
       }
     }

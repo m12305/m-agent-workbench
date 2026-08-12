@@ -19,11 +19,13 @@ MultiAgentService — MainAgent 的 FastAPI 服务包装
 import asyncio
 import hashlib
 import logging
+import threading
 from pathlib import Path
 from typing import AsyncGenerator
 
 from ...agents.multi_agent.main_agent import MainAgent
 from ...agents.multi_agent.sub_agent_registry import SubAgentRegistry
+from ...agents.multi_agent.events import AgentRunCancelled
 
 logger = logging.getLogger("server.multi_agent_service")
 
@@ -45,6 +47,7 @@ class MultiAgentService:
         self._store_type = store_type
         self._sqlite_path = sqlite_path
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._active_runs: dict[str, threading.Event] = {}
 
     # ── Agent 管理 ──
 
@@ -64,10 +67,12 @@ class MultiAgentService:
 
     def close_user(self, user_id: str):
         """释放用户的 MainAgent 实例"""
+        prefix = f"{user_id}:"
+        for thread_id in [key for key in self._active_runs if key.startswith(prefix)]:
+            self.cancel_run(thread_id)
         agent = self._agents.pop(user_id, None)
         if agent:
             agent.close()
-        prefix = f"{user_id}:"
         for thread_id in [key for key in self._session_locks if key.startswith(prefix)]:
             self._session_locks.pop(thread_id, None)
 
@@ -103,9 +108,20 @@ class MultiAgentService:
         # 同一会话只允许一个图执行，避免重复提交造成 checkpoint 写竞争。
         session_lock = self._session_locks.setdefault(tid, asyncio.Lock())
         async with session_lock:
+            cancellation_event = threading.Event()
+            self._active_runs[tid] = cancellation_event
             try:
-                async for event in agent.arun_stream(query, thread_id=tid):
+                async for event in agent.arun_stream(
+                    query,
+                    thread_id=tid,
+                    cancellation_event=cancellation_event,
+                ):
                     yield event
+            except (asyncio.CancelledError, GeneratorExit):
+                cancellation_event.set()
+                raise
+            except AgentRunCancelled:
+                logger.info("Multi-agent run cancelled for user=%s", user_id[:8])
             except Exception as e:
                 logger.exception("Multi-agent stream error for user=%s", user_id[:8])
                 yield {
@@ -116,6 +132,18 @@ class MultiAgentService:
                         "agent": "main",
                     },
                 }
+            finally:
+                cancellation_event.set()
+                if self._active_runs.get(tid) is cancellation_event:
+                    self._active_runs.pop(tid, None)
+
+    def cancel_run(self, thread_id: str) -> bool:
+        """Cooperatively stop the active graph run for a thread."""
+        cancellation_event = self._active_runs.get(thread_id)
+        if cancellation_event is None:
+            return False
+        cancellation_event.set()
+        return True
 
     # ── 注册 subagent ──
 
@@ -149,3 +177,6 @@ class MultiAgentService:
         for user_id in list(self._agents.keys()):
             self.close_user(user_id)
         self._session_locks.clear()
+        for cancellation_event in self._active_runs.values():
+            cancellation_event.set()
+        self._active_runs.clear()

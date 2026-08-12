@@ -30,6 +30,7 @@ Tool 隔离:
 
 import asyncio
 import sqlite3
+import threading
 import uuid
 from pathlib import Path
 from typing import AsyncGenerator, Generator
@@ -38,7 +39,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 
 from ..base import BaseAgent
 from ...models.llm import get_model, CAN_RUN
@@ -77,6 +79,11 @@ SUBAGENT_SYSTEM_PROMPT = """你是一个 **{subagent_type}** 子智能体: {desc
 # ═══════════════════════════════════════════════════════════════════════
 
 from .states import SubAgentState
+from .events import AgentRunCancelled
+
+
+MAX_REACT_ITERATIONS_PER_STEP = 4
+GRAPH_RECURSION_LIMIT = 50
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -124,6 +131,7 @@ class SubAgent(BaseAgent):
         self._checkpointer = None
         self._store = None
         self._sqlite_connections: tuple[sqlite3.Connection, ...] = ()
+        self._cancellation_events: dict[str, threading.Event] = {}
 
     # ═══ 初始化 ═══
 
@@ -212,7 +220,8 @@ class SubAgent(BaseAgent):
 
         # ── 节点定义 ──
 
-        def plan_node(state: SubAgentState) -> dict:
+        def plan_node(state: SubAgentState, config: RunnableConfig) -> dict:
+            self._raise_if_cancelled(config)
             """分解任务为子步骤"""
             prompt = decompose_task(
                 assigned_task=state.get("assigned_task", ""),
@@ -241,11 +250,13 @@ class SubAgent(BaseAgent):
                 "sub_plan": sub_plan,
                 "plan_raw": response.strategy,
                 "current_step_index": 0,
+                "react_iteration_count": 0,
                 "iteration_count": state.get("iteration_count", 0),
                 "messages": [AIMessage(content=f"计划已生成: {response.strategy}")],
             }
 
-        def agent_node(state: SubAgentState) -> dict:
+        def agent_node(state: SubAgentState, config: RunnableConfig) -> dict:
+            self._raise_if_cancelled(config)
             """ReAct agent 节点 — 决定调用工具或输出文本"""
             step_idx = state.get("current_step_index", 0)
             sub_plan = state.get("sub_plan", [])
@@ -266,17 +277,49 @@ class SubAgent(BaseAgent):
                 messages.append(HumanMessage(content=step_instruction))
 
             response = model_with_tools.invoke(messages)
-            return {"messages": [response]}
+            self._raise_if_cancelled(config)
+            return {
+                "messages": [response],
+                "react_iteration_count": state.get("react_iteration_count", 0) + 1,
+            }
 
-        def tools_node(state: SubAgentState) -> dict:
+        def tools_node(state: SubAgentState, config: RunnableConfig) -> dict:
+            self._raise_if_cancelled(config)
             """工具执行节点"""
             tool_node = ToolNode(tools)
-            return tool_node.invoke({"messages": state["messages"]})
+            result = tool_node.invoke({"messages": state["messages"]})
+            self._raise_if_cancelled(config)
+            return result
 
-        def evaluate_node(state: SubAgentState) -> dict:
+        def advance_step_node(state: SubAgentState, config: RunnableConfig) -> dict:
+            """Persist the current output and move to the next planned step."""
+            self._raise_if_cancelled(config)
+            step_idx = state.get("current_step_index", 0)
+            sub_plan = state.get("sub_plan", [])
+            step_id = str(
+                sub_plan[step_idx].get("step_id", step_idx + 1)
+                if 0 <= step_idx < len(sub_plan)
+                else step_idx + 1
+            )
+            step_results = dict(state.get("step_results", {}))
+            step_results[step_id] = self._latest_execution_result(
+                state.get("messages", [])
+            )
+            return {
+                "step_results": step_results,
+                "current_step_index": step_idx + 1,
+                "react_iteration_count": 0,
+            }
+
+        def evaluate_node(state: SubAgentState, config: RunnableConfig) -> dict:
+            self._raise_if_cancelled(config)
             """自评结果质量"""
             sub_plan = state.get("sub_plan", [])
-            step_results = state.get("step_results", {})
+            step_results = {
+                key: value
+                for key, value in state.get("step_results", {}).items()
+                if not str(key).startswith("_")
+            }
             plan_summary = "\n".join(
                 f"  {s['step_id']}: {s['description']}" for s in sub_plan
             ) if sub_plan else "（无计划）"
@@ -307,9 +350,14 @@ class SubAgent(BaseAgent):
                 "messages": [AIMessage(content=f"自评: {response.feedback}")],
             }
 
-        def report_node(state: SubAgentState) -> dict:
+        def report_node(state: SubAgentState, config: RunnableConfig) -> dict:
+            self._raise_if_cancelled(config)
             """格式化最终结果"""
-            step_results = state.get("step_results", {})
+            step_results = {
+                key: value
+                for key, value in state.get("step_results", {}).items()
+                if not str(key).startswith("_")
+            }
             result_parts = []
             for step_id, result in sorted(step_results.items()):
                 result_parts.append(f"## 步骤 {step_id}\n{result}")
@@ -330,10 +378,18 @@ class SubAgent(BaseAgent):
                 return END
             last_msg = messages[-1]
             if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                if state.get("react_iteration_count", 0) > MAX_REACT_ITERATIONS_PER_STEP:
+                    self.logger.warning(
+                        "Step tool-call limit reached (%d); advancing",
+                        MAX_REACT_ITERATIONS_PER_STEP,
+                    )
+                    return "advance_step"
                 return "tools"
             return "advance_step"
 
-        def should_evaluate(state: SubAgentState) -> str:
+        def after_advance_step(state: SubAgentState) -> str:
+            if state.get("current_step_index", 0) < len(state.get("sub_plan", [])):
+                return "agent"
             """计划执行后: 进入评估"""
             return "evaluate"
 
@@ -352,6 +408,7 @@ class SubAgent(BaseAgent):
         workflow.add_node("plan", plan_node)
         workflow.add_node("agent", agent_node)
         workflow.add_node("tools", tools_node)
+        workflow.add_node("advance_step", advance_step_node)
         workflow.add_node("evaluate", evaluate_node)
         workflow.add_node("report", report_node)
 
@@ -364,9 +421,14 @@ class SubAgent(BaseAgent):
         workflow.add_conditional_edges(
             "agent",
             should_continue,
-            {"tools": "tools", "advance_step": "evaluate"},
+            {"tools": "tools", "advance_step": "advance_step"},
         )
         workflow.add_edge("tools", "agent")
+        workflow.add_conditional_edges(
+            "advance_step",
+            after_advance_step,
+            {"agent": "agent", "evaluate": "evaluate"},
+        )
 
         # 评估 → 修正或提交
         workflow.add_conditional_edges(
@@ -389,6 +451,7 @@ class SubAgent(BaseAgent):
         assigned_task: str,
         thread_id: str | None = None,
         context: str = "",
+        cancellation_event: threading.Event | None = None,
     ) -> str:
         """执行分配的任务 (同步)
 
@@ -402,13 +465,19 @@ class SubAgent(BaseAgent):
         """
         self.initialize()
         tid = thread_id or str(uuid.uuid4())[:12]
-        config = {"configurable": {"thread_id": tid}}
+        if cancellation_event is not None:
+            self._cancellation_events[tid] = cancellation_event
+        config = {
+            "configurable": {"thread_id": tid},
+            "recursion_limit": GRAPH_RECURSION_LIMIT,
+        }
 
         initial_state = {
             "assigned_task": assigned_task,
             "subagent_type": self.subagent_type,
             "step_results": {"_context": context},
             "iteration_count": 0,
+            "react_iteration_count": 0,
             "messages": [
                 SystemMessage(content=SUBAGENT_SYSTEM_PROMPT.format(
                     subagent_type=self.subagent_type,
@@ -418,14 +487,18 @@ class SubAgent(BaseAgent):
             ],
         }
 
-        result = self._graph.invoke(initial_state, config)
-        return result.get("final_result", "")
+        try:
+            result = self._graph.invoke(initial_state, config)
+            return result.get("final_result", "")
+        finally:
+            self._cancellation_events.pop(tid, None)
 
     def run_stream(
         self,
         assigned_task: str,
         thread_id: str | None = None,
         context: str = "",
+        cancellation_event: threading.Event | None = None,
     ) -> Generator[dict, None, str]:
         """执行任务 (同步流式)
 
@@ -437,13 +510,19 @@ class SubAgent(BaseAgent):
         """
         self.initialize()
         tid = thread_id or str(uuid.uuid4())[:12]
-        config = {"configurable": {"thread_id": tid}}
+        if cancellation_event is not None:
+            self._cancellation_events[tid] = cancellation_event
+        config = {
+            "configurable": {"thread_id": tid},
+            "recursion_limit": GRAPH_RECURSION_LIMIT,
+        }
 
         initial_state = {
             "assigned_task": assigned_task,
             "subagent_type": self.subagent_type,
             "step_results": {"_context": context},
             "iteration_count": 0,
+            "react_iteration_count": 0,
             "messages": [
                 SystemMessage(content=SUBAGENT_SYSTEM_PROMPT.format(
                     subagent_type=self.subagent_type,
@@ -503,43 +582,41 @@ class SubAgent(BaseAgent):
         assigned_task: str,
         thread_id: str | None = None,
         context: str = "",
+        cancellation_event: threading.Event | None = None,
     ) -> str:
         """执行任务 (异步)"""
-        return await asyncio.to_thread(self.run, assigned_task, thread_id, context)
+        return await asyncio.to_thread(
+            self.run, assigned_task, thread_id, context, cancellation_event
+        )
 
     async def arun_stream(
         self,
         assigned_task: str,
         thread_id: str | None = None,
         context: str = "",
+        cancellation_event: threading.Event | None = None,
     ) -> AsyncGenerator[dict, None]:
         """执行任务 (异步流式)"""
-        loop = asyncio.get_event_loop()
+        cancel = cancellation_event or threading.Event()
+        effective_tid = thread_id or str(uuid.uuid4())[:12]
+        gen = self.run_stream(
+            assigned_task, effective_tid, context, cancellation_event=cancel
+        )
+        sentinel = object()
 
-        def _sync_gen():
-            final = ""
-            for event in self.run_stream(assigned_task, thread_id, context):
-                final = event
-                yield event
-            # yield final result marker
-            yield {"event": "_final", "data": {"final_result": getattr(
-                self._graph.get_state(
-                    {"configurable": {"thread_id": thread_id or "default"}}
-                ) if self._graph else None,
-                "values", {},
-            ).get("final_result", "")}}
+        def next_event():
+            return next(gen, sentinel)
 
         # 在线程池中运行同步生成器
-        done = False
-        while not done:
-            try:
-                chunk = await loop.run_in_executor(None, next, _sync_gen())
-                if chunk.get("event") == "_final":
-                    done = True
-                else:
-                    yield chunk
-            except StopIteration:
-                done = True
+        try:
+            while True:
+                chunk = await asyncio.to_thread(next_event)
+                if chunk is sentinel:
+                    break
+                yield chunk
+        finally:
+            cancel.set()
+            self._cancellation_events.pop(effective_tid, None)
 
     # ═══ 辅助方法 ═══
 
@@ -576,11 +653,35 @@ class SubAgent(BaseAgent):
             return "".join(parts)
         return str(content) if content else ""
 
+    @staticmethod
+    def _latest_execution_result(messages) -> str:
+        """Return the latest useful model/tool output for a completed step."""
+        for message in reversed(messages):
+            content = getattr(message, "content", None)
+            if isinstance(message, AIMessage) and not getattr(message, "tool_calls", None):
+                text = SubAgent._message_chunk_text(content)
+                if text:
+                    return text
+            if isinstance(message, ToolMessage):
+                text = SubAgent._message_chunk_text(content)
+                if text:
+                    return text
+        return "（该步骤未返回可用结果）"
+
+    def _raise_if_cancelled(self, config: RunnableConfig) -> None:
+        thread_id = config.get("configurable", {}).get("thread_id")
+        cancellation_event = self._cancellation_events.get(thread_id)
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise AgentRunCancelled("任务已由用户中止")
+
     # ═══ 生命周期 ═══
 
     def close(self):
         """清理资源"""
         self._graph = None
+        for cancellation_event in self._cancellation_events.values():
+            cancellation_event.set()
+        self._cancellation_events.clear()
         connections = self._sqlite_connections
         self._sqlite_connections = ()
         for connection in reversed(connections):

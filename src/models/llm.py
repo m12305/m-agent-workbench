@@ -56,7 +56,7 @@ PROVIDER_CONFIG = {
         "default_model": "deepseek-chat",
         "module": "langchain_deepseek",
         "class": "ChatDeepSeek",
-        "base_url": None,
+        "base_url": "https://api.deepseek.com",
     },
     "anthropic": {
         "name": "Anthropic",

@@ -51,9 +51,10 @@ class MainAgentState(TypedDict, total=False):
     subagent_results: dict[str, str]    # {step_id → result_text}
     subagent_statuses: dict[str, str]   # {step_id → pending|running|success|failed}
 
+    step_retry_counts: dict[str, int]   # {step_id → failed attempt count}
+
     # ── 综合 ──
     synthesized_answer: str
-    needs_replan: bool
 
     # ── 安全 ──
     iteration_count: int
@@ -102,3 +103,4 @@ class SubAgentState(TypedDict, total=False):
 
     # ── 安全 ──
     iteration_count: int
+    react_iteration_count: int

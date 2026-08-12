@@ -16,6 +16,7 @@ POST /api/v1/multi-agent/chat/stream  — SSE 流式多智能体问答
 
 import json
 import logging
+import asyncio
 
 from fastapi import APIRouter, Depends, Request, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -106,12 +107,22 @@ async def multi_agent_chat_stream(
                 session_id=session_id,
                 query=body.query,
             ):
+                if await request.is_disconnected():
+                    multi_agent_service.cancel_run(
+                        multi_agent_service._make_tid(identity.user_id, session_id)
+                    )
+                    return
                 event_type = event.get("event", "message")
                 data = event.get("data", {})
                 yield {
                     "event": event_type,
                     "data": json.dumps(data, ensure_ascii=False, default=str),
                 }
+        except (GeneratorExit, asyncio.CancelledError):
+            multi_agent_service.cancel_run(
+                multi_agent_service._make_tid(identity.user_id, session_id)
+            )
+            raise
         except Exception as e:
             logger.exception("Multi-agent stream error")
             yield {
@@ -124,6 +135,11 @@ async def multi_agent_chat_stream(
             }
 
         # 结束事件
+        if await request.is_disconnected():
+            multi_agent_service.cancel_run(
+                multi_agent_service._make_tid(identity.user_id, session_id)
+            )
+            return
         yield {
             "event": "done",
             "data": json.dumps({"session_id": session_id}, ensure_ascii=False),
@@ -135,6 +151,23 @@ async def multi_agent_chat_stream(
         )
 
     return EventSourceResponse(event_generator())
+
+
+@router.post("/multi-agent/chat/{session_id}/cancel")
+async def cancel_multi_agent_run(
+    session_id: str,
+    identity: Identity = Depends(get_identity),
+    multi_agent_service: MultiAgentService = Depends(get_multi_agent_service),
+    session_service: SessionService = Depends(get_session_service),
+):
+    """Cooperatively cancel the active run owned by the current user."""
+    session = await session_service.get_session(session_id)
+    if session is None or session.user_id != identity.user_id:
+        return {"cancelled": False}
+    cancelled = multi_agent_service.cancel_run(
+        multi_agent_service._make_tid(identity.user_id, session_id)
+    )
+    return {"cancelled": cancelled}
 
 
 async def _error_stream(code: str, message: str):

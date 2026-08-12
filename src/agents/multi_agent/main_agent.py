@@ -8,7 +8,7 @@ MainAgent — 层级多智能体编排器
   2. plan:      生成执行计划 (选择 subagent + 步骤排序)
   3. execute:   逐步骤调度 subagent, 收集结果
   4. synthesize: 综合 subagent 结果 → 最终回答
-  5. replan:    步骤失败时调整计划
+  5. retry:     步骤失败时回到当前执行步骤重试
 
 与 SubAgent 的关系:
   MainAgent 通过 SubAgentRegistry 发现可用 subagent,
@@ -35,6 +35,7 @@ MainAgent — 层级多智能体编排器
 
 import asyncio
 import sqlite3
+import threading
 import uuid
 from pathlib import Path
 from typing import AsyncGenerator, Generator
@@ -43,6 +44,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.runnables import RunnableConfig
 
 from ..base import BaseAgent
 from ...models.llm import get_model, CAN_RUN
@@ -61,14 +63,15 @@ from ...tools.multi_agent_planning.delegation_builder import (
 from ...tools.multi_agent_planning.result_aggregator import (
     aggregate_results, AggregationOutput,
 )
-from ...tools.multi_agent_planning.plan_adjuster import (
-    adjust_plan, AdjustedPlanOutput,
-)
 from .sub_agent_registry import SubAgentRegistry
 from .sub_agent import SubAgent
 from .states import MainAgentState
 from .events import MultiAgentEvent
+from .events import AgentRunCancelled
 from ...utils.logger import get_logger
+
+
+GRAPH_RECURSION_LIMIT = 50
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -119,7 +122,8 @@ class MainAgent(BaseAgent):
         model_kwargs:           传递给 get_model() 的参数
         store_type:             存储类型: "memory" | "sqlite"
         sqlite_path:            SQLite 路径
-        max_replans:            最大重规划次数 (默认 2)
+        max_step_retries:       单个执行步骤的最大重试次数 (默认 2)
+        max_replans:            max_step_retries 的兼容别名
     """
 
     def __init__(
@@ -129,7 +133,8 @@ class MainAgent(BaseAgent):
         model_kwargs: dict | None = None,
         store_type: str = "memory",
         sqlite_path: str | None = None,
-        max_replans: int = 2,
+        max_step_retries: int = 2,
+        max_replans: int | None = None,
         **kwargs,
     ):
         super().__init__(name=name, **kwargs)
@@ -137,7 +142,10 @@ class MainAgent(BaseAgent):
         self._model_kwargs = model_kwargs or {}
         self._store_type = store_type
         self._sqlite_path = sqlite_path
-        self._max_replans = max_replans
+        # Backwards-compatible alias: failures now retry the same execute step.
+        self._max_step_retries = (
+            max_replans if max_replans is not None else max_step_retries
+        )
 
         # 在 _setup 中设置
         self.tool_registry: ToolRegistry | None = None
@@ -146,6 +154,7 @@ class MainAgent(BaseAgent):
         self._store = None
         self._sqlite_connections: tuple[sqlite3.Connection, ...] = ()
         self._sub_agents_cache: dict[str, SubAgent] = {}
+        self._cancellation_events: dict[str, threading.Event] = {}
 
     # ═══ 初始化 ═══
 
@@ -220,12 +229,13 @@ class MainAgent(BaseAgent):
     def _build_graph(self):
         """构建编排器 LangGraph 图:
         analyze → (simple? → respond) → plan → execute → synthesize → END
-                  execute 内部: dispatch → (fail? → replan → plan)
+                  execute 内部: dispatch → (fail? → retry execute)
         """
 
         # ── 节点定义 ──
 
-        def analyze_node(state: MainAgentState) -> dict:
+        def analyze_node(state: MainAgentState, config: RunnableConfig) -> dict:
+            self._raise_if_cancelled(config)
             """分析用户任务"""
             user_task = state.get("user_task", "")
             subagent_list = self.sub_agent_registry.build_selection_prompt()
@@ -253,7 +263,8 @@ class MainAgent(BaseAgent):
                 )],
             }
 
-        def respond_node(state: MainAgentState) -> dict:
+        def respond_node(state: MainAgentState, config: RunnableConfig) -> dict:
+            self._raise_if_cancelled(config)
             """简单任务直接回答"""
             user_task = state.get("user_task", "")
             messages = [
@@ -268,7 +279,8 @@ class MainAgent(BaseAgent):
                 "messages": [response],
             }
 
-        def plan_node(state: MainAgentState) -> dict:
+        def plan_node(state: MainAgentState, config: RunnableConfig) -> dict:
+            self._raise_if_cancelled(config)
             """生成执行计划"""
             user_task = state.get("user_task", "")
             task_summary = state.get("task_summary", "")
@@ -303,17 +315,20 @@ class MainAgent(BaseAgent):
                 "current_step_index": 0,
                 "subagent_results": {},
                 "subagent_statuses": {},
+                "step_retry_counts": {},
                 "messages": [
                     AIMessage(content=f"执行计划已生成: {len(plan)} 个步骤\n{response.overall_strategy}")
                 ],
             }
 
-        def execute_node(state: MainAgentState) -> dict:
+        def execute_node(state: MainAgentState, config: RunnableConfig) -> dict:
+            self._raise_if_cancelled(config)
             """执行当前步骤 — 调度 subagent"""
             plan = state.get("plan", [])
             step_idx = state.get("current_step_index", 0)
             results = dict(state.get("subagent_results", {}))
             statuses = dict(state.get("subagent_statuses", {}))
+            retry_counts = dict(state.get("step_retry_counts", {}))
 
             if step_idx >= len(plan):
                 return {"subagent_results": results, "subagent_statuses": statuses}
@@ -336,9 +351,16 @@ class MainAgent(BaseAgent):
                     SystemMessage(content=MAIN_AGENT_SYSTEM_PROMPT),
                     HumanMessage(content=prompt),
                 ]
-                response = self.model.invoke(messages)
-                results[step_id] = response.content if response else ""
-                statuses[step_id] = "success"
+                try:
+                    response = self.model.invoke(messages)
+                    results[step_id] = response.content if response else ""
+                    statuses[step_id] = "success"
+                except AgentRunCancelled:
+                    raise
+                except Exception as e:
+                    self.logger.error("MainAgent direct step %s failed: %s", step_id, e)
+                    results[step_id] = f"[失败] {e}"
+                    statuses[step_id] = "failed"
             else:
                 # 调度 subagent
                 try:
@@ -349,25 +371,58 @@ class MainAgent(BaseAgent):
                         f"上下文: {context}\n\n"
                         f"请完成此任务并返回结果。"
                     )
-                    result = sub.run(delegation_task, context=context)
+                    result = sub.run(
+                        delegation_task,
+                        context=context,
+                        cancellation_event=self._cancellation_events.get(
+                            config.get("configurable", {}).get("thread_id")
+                        ),
+                    )
+                    self._raise_if_cancelled(config)
                     results[step_id] = result
                     statuses[step_id] = "success"
+                except AgentRunCancelled:
+                    raise
                 except Exception as e:
                     self.logger.error("SubAgent %s failed: %s", subagent_type, e)
                     results[step_id] = f"[失败] {e}"
                     statuses[step_id] = "failed"
 
+            if statuses[step_id] == "failed":
+                failed_attempts = retry_counts.get(step_id, 0) + 1
+                retry_counts[step_id] = failed_attempts
+                if failed_attempts <= self._max_step_retries:
+                    next_step_idx = step_idx
+                    self.logger.warning(
+                        "Retrying failed step %s (%d/%d)",
+                        step_id,
+                        failed_attempts,
+                        self._max_step_retries,
+                    )
+                else:
+                    next_step_idx = step_idx + 1
+                    self.logger.error(
+                        "Step %s exhausted %d retries; continuing with failure",
+                        step_id,
+                        self._max_step_retries,
+                    )
+            else:
+                retry_counts.pop(step_id, None)
+                next_step_idx = step_idx + 1
+
             return {
                 "subagent_results": results,
                 "subagent_statuses": statuses,
-                "current_step_index": step_idx + 1,
+                "step_retry_counts": retry_counts,
+                "current_step_index": next_step_idx,
                 "messages": [
                     AIMessage(content=f"步骤 {step_id} ({subagent_type or 'direct'}): "
                               f"{statuses[step_id]}")
                 ],
             }
 
-        def synthesize_node(state: MainAgentState) -> dict:
+        def synthesize_node(state: MainAgentState, config: RunnableConfig) -> dict:
+            self._raise_if_cancelled(config)
             """综合所有 subagent 结果"""
             user_task = state.get("user_task", "")
             results = state.get("subagent_results", {})
@@ -397,58 +452,6 @@ class MainAgent(BaseAgent):
                 "messages": [AIMessage(content=response.answer)],
             }
 
-        def replan_node(state: MainAgentState) -> dict:
-            """失败时重新规划"""
-            plan = state.get("plan", [])
-            results = state.get("subagent_results", {})
-            statuses = state.get("subagent_statuses", {})
-
-            # 已完成和失败的步骤
-            completed = "\n".join(
-                f"步骤 {sid}: {results.get(sid, '')}"
-                for sid, st in statuses.items() if st == "success"
-            ) or "（无）"
-
-            failed_steps = [
-                f"步骤 {sid}: {results.get(sid, '')}"
-                for sid, st in statuses.items() if st == "failed"
-            ]
-            failed = "\n".join(failed_steps) if failed_steps else "（无）"
-
-            prompt = adjust_plan(
-                user_task=state.get("user_task", ""),
-                original_plan=str(plan),
-                completed_steps=completed,
-                failed_step=failed,
-            )
-            messages = [HumanMessage(content=prompt)]
-            structured_model = self.model.with_structured_output(AdjustedPlanOutput)
-            response = structured_model.invoke(messages)
-
-            # 转换为 plan 格式
-            new_plan = [
-                {
-                    "step_id": s.step_id,
-                    "description": s.description,
-                    "subagent_type": s.subagent_type,
-                    "input_summary": s.input_summary,
-                    "depends_on": s.depends_on,
-                }
-                for s in response.adjusted_plan
-            ]
-
-            self.logger.info("Replan: %s — %d adjusted steps",
-                             response.strategy, len(new_plan))
-            return {
-                "plan": new_plan,
-                "current_step_index": 0,
-                "needs_replan": False,
-                "iteration_count": state.get("iteration_count", 0) + 1,
-                "messages": [
-                    AIMessage(content=f"计划已调整: {response.strategy}")
-                ],
-            }
-
         # ── 路由函数 ──
 
         def after_analyze(state: MainAgentState) -> str:
@@ -462,29 +465,10 @@ class MainAgent(BaseAgent):
             return "execute"
 
         def after_execute(state: MainAgentState) -> str:
-            """执行后: 全部完成→综合, 有失败→重规划, 继续→执行"""
+            """Retry or continue using the index selected by execute_node."""
             plan = state.get("plan", [])
             step_idx = state.get("current_step_index", 0)
-            statuses = state.get("subagent_statuses", {})
-
-            # 检查是否有失败的步骤
-            has_failed = any(s == "failed" for s in statuses.values())
-            if has_failed:
-                iteration = state.get("iteration_count", 0)
-                if iteration < self._max_replans:
-                    return "replan"
-                self.logger.warning("达到最大重规划次数 %d，跳过失败步骤", self._max_replans)
-
-            # 还有未执行的步骤
-            if step_idx < len(plan):
-                return "execute"
-
-            # 全部完成
-            return "synthesize"
-
-        def after_replan(state: MainAgentState) -> str:
-            """重规划后: 回到 plan 节点"""
-            return "plan"
+            return "execute" if step_idx < len(plan) else "synthesize"
 
         # ── 构建图 ──
 
@@ -494,7 +478,6 @@ class MainAgent(BaseAgent):
         workflow.add_node("plan", plan_node)
         workflow.add_node("execute", execute_node)
         workflow.add_node("synthesize", synthesize_node)
-        workflow.add_node("replan", replan_node)
 
         workflow.set_entry_point("analyze")
 
@@ -510,10 +493,8 @@ class MainAgent(BaseAgent):
             {
                 "execute": "execute",
                 "synthesize": "synthesize",
-                "replan": "replan",
             },
         )
-        workflow.add_edge("replan", "plan")
         workflow.add_edge("respond", END)
         workflow.add_edge("synthesize", END)
 
@@ -522,7 +503,7 @@ class MainAgent(BaseAgent):
             store=self._store,
         )
         self.logger.info(
-            "Graph compiled: analyze→(respond|plan→execute→(synthesize|replan))"
+            "Graph compiled: analyze→(respond|plan→execute(retry)→synthesize)"
         )
 
     # ═══ 执行 (同步) ═══
@@ -531,6 +512,7 @@ class MainAgent(BaseAgent):
         self,
         user_task: str,
         thread_id: str | None = None,
+        cancellation_event: threading.Event | None = None,
     ) -> str:
         """执行用户任务 (同步)
 
@@ -538,7 +520,12 @@ class MainAgent(BaseAgent):
         """
         self.initialize()
         tid = thread_id or str(uuid.uuid4())[:12]
-        config = {"configurable": {"thread_id": tid}}
+        if cancellation_event is not None:
+            self._cancellation_events[tid] = cancellation_event
+        config = {
+            "configurable": {"thread_id": tid},
+            "recursion_limit": GRAPH_RECURSION_LIMIT,
+        }
 
         initial_state = {
             "user_task": user_task,
@@ -548,13 +535,17 @@ class MainAgent(BaseAgent):
             ],
         }
 
-        result = self._graph.invoke(initial_state, config)
-        return result.get("synthesized_answer", "无法完成任务")
+        try:
+            result = self._graph.invoke(initial_state, config)
+            return result.get("synthesized_answer", "无法完成任务")
+        finally:
+            self._cancellation_events.pop(tid, None)
 
     def run_stream(
         self,
         user_task: str,
         thread_id: str | None = None,
+        cancellation_event: threading.Event | None = None,
     ) -> Generator[dict, None, str]:
         """执行任务 (同步流式)
 
@@ -566,7 +557,12 @@ class MainAgent(BaseAgent):
         """
         self.initialize()
         tid = thread_id or str(uuid.uuid4())[:12]
-        config = {"configurable": {"thread_id": tid}}
+        if cancellation_event is not None:
+            self._cancellation_events[tid] = cancellation_event
+        config = {
+            "configurable": {"thread_id": tid},
+            "recursion_limit": GRAPH_RECURSION_LIMIT,
+        }
 
         initial_state = {
             "user_task": user_task,
@@ -616,29 +612,39 @@ class MainAgent(BaseAgent):
         self,
         user_task: str,
         thread_id: str | None = None,
+        cancellation_event: threading.Event | None = None,
     ) -> str:
         """执行任务 (异步)"""
-        return await asyncio.to_thread(self.run, user_task, thread_id)
+        return await asyncio.to_thread(
+            self.run, user_task, thread_id, cancellation_event
+        )
 
     async def arun_stream(
         self,
         user_task: str,
         thread_id: str | None = None,
+        cancellation_event: threading.Event | None = None,
     ) -> AsyncGenerator[dict, None]:
         """执行任务 (异步流式)"""
-        loop = asyncio.get_event_loop()
+        effective_tid = thread_id or str(uuid.uuid4())[:12]
+        gen = self.run_stream(
+            user_task, effective_tid, cancellation_event=cancellation_event
+        )
+        sentinel = object()
 
-        def _sync_gen():
-            yield from self.run_stream(user_task, thread_id)
+        def next_event():
+            return next(gen, sentinel)
 
-        done = False
-        gen = _sync_gen()
-        while not done:
-            try:
-                chunk = await loop.run_in_executor(None, next, gen)
+        try:
+            while True:
+                chunk = await asyncio.to_thread(next_event)
+                if chunk is sentinel:
+                    break
                 yield chunk
-            except StopIteration:
-                done = True
+        finally:
+            if cancellation_event is not None:
+                cancellation_event.set()
+            self._cancellation_events.pop(effective_tid, None)
 
     # ═══ SubAgent 管理 ═══
 
@@ -714,7 +720,6 @@ class MainAgent(BaseAgent):
             "plan": MultiAgentEvent.STATUS,
             "execute": MultiAgentEvent.DISPATCHING,
             "synthesize": MultiAgentEvent.SYNTHESIZING,
-            "replan": MultiAgentEvent.STATUS,
             "respond": MultiAgentEvent.STATUS,
         }
         event_type = mapping.get(node_name)
@@ -726,7 +731,6 @@ class MainAgent(BaseAgent):
             "plan": "正在生成执行计划...",
             "execute": "正在执行计划步骤...",
             "synthesize": "正在综合结果...",
-            "replan": "正在调整计划...",
             "respond": "正在生成回答...",
         }
         return {
@@ -753,6 +757,12 @@ class MainAgent(BaseAgent):
             return "".join(parts)
         return str(content) if content else ""
 
+    def _raise_if_cancelled(self, config: RunnableConfig) -> None:
+        thread_id = config.get("configurable", {}).get("thread_id")
+        cancellation_event = self._cancellation_events.get(thread_id)
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise AgentRunCancelled("任务已由用户中止")
+
     # ═══ 生命周期 ═══
 
     def close(self):
@@ -766,6 +776,9 @@ class MainAgent(BaseAgent):
 
         # Graph 持有 checkpointer/store 引用，先释放 graph 再关闭底层连接。
         self._graph = None
+        for cancellation_event in self._cancellation_events.values():
+            cancellation_event.set()
+        self._cancellation_events.clear()
         connections = self._sqlite_connections
         self._sqlite_connections = ()
         for connection in reversed(connections):

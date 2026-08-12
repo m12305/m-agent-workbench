@@ -11,6 +11,10 @@
 from enum import StrEnum
 
 
+class AgentRunCancelled(Exception):
+    """Raised inside synchronous graph workers when the client cancels a run."""
+
+
 class MultiAgentEvent(StrEnum):
     """多智能体 SSE 事件类型"""
 
