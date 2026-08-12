@@ -2,7 +2,10 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
+
+
+SessionType = Literal["chat", "multi_agent"]
 
 
 @dataclass
@@ -33,6 +36,7 @@ class Identity:
 class Session:
     session_id: str
     user_id: str
+    session_type: SessionType
     title: str | None
     message_count: int = 0
     created_at: datetime = field(default_factory=datetime.utcnow)
@@ -54,9 +58,13 @@ class ApiKeyRepository(Protocol):
 
 
 class SessionRepository(Protocol):
-    async def create(self, user_id: str, title: str | None) -> Session: ...
+    async def create(
+        self, user_id: str, title: str | None, session_type: SessionType,
+    ) -> Session: ...
     async def get(self, session_id: str) -> Session | None: ...
-    async def list_by_user(self, user_id: str) -> list[Session]: ...
+    async def list_by_user(
+        self, user_id: str, session_type: SessionType,
+    ) -> list[Session]: ...
     async def update(self, session_id: str, **kwargs) -> Session | None: ...
     async def delete(self, session_id: str) -> None: ...
 

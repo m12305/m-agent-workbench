@@ -68,23 +68,156 @@ async def test_valid_user_key_works(client: AsyncClient, user_headers):
 async def test_create_session(client: AsyncClient, user_headers):
     resp = await client.post(
         "/api/v1/sessions",
-        json={"title": "测试会话"},
+        json={"title": "测试会话", "session_type": "chat"},
         headers=user_headers,
     )
     assert resp.status_code == 201
     data = resp.json()
     assert "session_id" in data
     assert data["title"] == "测试会话"
+    assert data["session_type"] == "chat"
     assert data["message_count"] == 0
 
 
 @pytest.mark.asyncio
 async def test_list_sessions(client: AsyncClient, user_headers):
     # 先创建一个
-    await client.post("/api/v1/sessions", json={}, headers=user_headers)
-    resp = await client.get("/api/v1/sessions", headers=user_headers)
+    await client.post(
+        "/api/v1/sessions",
+        json={"session_type": "chat"},
+        headers=user_headers,
+    )
+    resp = await client.get(
+        "/api/v1/sessions?session_type=chat", headers=user_headers,
+    )
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_session_type_is_required(client: AsyncClient, user_headers):
+    resp = await client.post(
+        "/api/v1/sessions",
+        json={"title": "缺少类型"},
+        headers=user_headers,
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_session_lists_are_filtered_by_type(
+    client: AsyncClient, user_headers,
+):
+    chat = await client.post(
+        "/api/v1/sessions",
+        json={"title": "Chat", "session_type": "chat"},
+        headers=user_headers,
+    )
+    multi_agent = await client.post(
+        "/api/v1/sessions",
+        json={"title": "Multi-Agent", "session_type": "multi_agent"},
+        headers=user_headers,
+    )
+
+    chat_sessions = await client.get(
+        "/api/v1/sessions?session_type=chat", headers=user_headers,
+    )
+    multi_agent_sessions = await client.get(
+        "/api/v1/sessions?session_type=multi_agent", headers=user_headers,
+    )
+
+    assert {item["session_id"] for item in chat_sessions.json()} == {
+        chat.json()["session_id"],
+    }
+    assert {item["session_id"] for item in multi_agent_sessions.json()} == {
+        multi_agent.json()["session_id"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_chat_rejects_multi_agent_session(
+    client: AsyncClient, user_headers,
+):
+    session = await client.post(
+        "/api/v1/sessions",
+        json={"title": "Multi-Agent", "session_type": "multi_agent"},
+        headers=user_headers,
+    )
+
+    resp = await client.post(
+        "/api/v1/chat",
+        json={"query": "你好", "session_id": session.json()["session_id"]},
+        headers=user_headers,
+    )
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_multi_agent_rejects_chat_session(
+    client: AsyncClient, user_headers,
+):
+    session = await client.post(
+        "/api/v1/sessions",
+        json={"title": "Chat", "session_type": "chat"},
+        headers=user_headers,
+    )
+
+    resp = await client.post(
+        "/api/v1/multi-agent/chat/stream",
+        json={"query": "分析任务", "session_id": session.json()["session_id"]},
+        headers=user_headers,
+    )
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_messages_route_to_multi_agent_service(
+    client: AsyncClient, user_headers, monkeypatch,
+):
+    from langchain_core.messages import AIMessage, HumanMessage
+    from src.server.main import app
+
+    session = await client.post(
+        "/api/v1/sessions",
+        json={"title": "Multi-Agent", "session_type": "multi_agent"},
+        headers=user_headers,
+    )
+    session_id = session.json()["session_id"]
+
+    def multi_agent_messages(user_id: str, requested_session_id: str):
+        assert user_id
+        assert requested_session_id == session_id
+        return [
+            HumanMessage(content="分析任务"),
+            AIMessage(content="最终结果"),
+        ]
+
+    def unexpected_chat_messages(*_args):
+        raise AssertionError("multi-agent history must not use ChatService")
+
+    monkeypatch.setattr(
+        app.state.multi_agent_service,
+        "get_session_messages",
+        multi_agent_messages,
+    )
+    monkeypatch.setattr(
+        app.state.chat_service,
+        "get_session_messages",
+        unexpected_chat_messages,
+    )
+
+    resp = await client.get(
+        f"/api/v1/sessions/{session_id}/messages",
+        headers=user_headers,
+    )
+
+    assert resp.status_code == 200
+    assert [(item["role"], item["content"]) for item in resp.json()] == [
+        ("user", "分析任务"),
+        ("assistant", "最终结果"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -93,7 +226,7 @@ async def test_regular_user_can_rename_own_session(
 ):
     resp = await client.post(
         "/api/v1/sessions",
-        json={"title": "旧标题"},
+        json={"title": "旧标题", "session_type": "chat"},
         headers=user_headers,
     )
     session_id = resp.json()["session_id"]
@@ -114,7 +247,7 @@ async def test_cannot_rename_another_users_session(
 ):
     resp = await client.post(
         "/api/v1/sessions",
-        json={"title": "用户会话"},
+        json={"title": "用户会话", "session_type": "chat"},
         headers=user_headers,
     )
     session_id = resp.json()["session_id"]
@@ -130,7 +263,11 @@ async def test_cannot_rename_another_users_session(
 
 @pytest.mark.asyncio
 async def test_delete_session(client: AsyncClient, user_headers):
-    resp = await client.post("/api/v1/sessions", json={}, headers=user_headers)
+    resp = await client.post(
+        "/api/v1/sessions",
+        json={"session_type": "chat"},
+        headers=user_headers,
+    )
     session_id = resp.json()["session_id"]
 
     resp = await client.delete(
@@ -147,7 +284,9 @@ async def test_cannot_access_other_user_session(
     """验证用户隔离: user 创建会话, admin 不能访问"""
     # user 创建会话
     resp = await client.post(
-        "/api/v1/sessions", json={}, headers=user_headers,
+        "/api/v1/sessions",
+        json={"session_type": "chat"},
+        headers=user_headers,
     )
     session_id = resp.json()["session_id"]
 
@@ -184,7 +323,8 @@ async def test_chat_with_existing_session(
     """在已有会话中问答"""
     # 创建会话
     resp = await client.post(
-        "/api/v1/sessions", json={"title": "Chat"},
+        "/api/v1/sessions",
+        json={"title": "Chat", "session_type": "chat"},
         headers=user_headers,
     )
     session_id = resp.json()["session_id"]

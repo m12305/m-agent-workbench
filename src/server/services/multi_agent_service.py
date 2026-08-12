@@ -23,6 +23,8 @@ import threading
 from pathlib import Path
 from typing import AsyncGenerator
 
+from langchain_core.messages import AIMessage, HumanMessage
+
 from ...agents.multi_agent.main_agent import MainAgent
 from ...agents.multi_agent.sub_agent_registry import SubAgentRegistry
 from ...agents.multi_agent.events import AgentRunCancelled
@@ -144,6 +146,26 @@ class MultiAgentService:
             return False
         cancellation_event.set()
         return True
+
+    def get_session_messages(self, user_id: str, session_id: str) -> list:
+        """Return the task/final-answer pair without orchestration internals."""
+        agent = self._get_or_create_agent(user_id)
+        if agent._graph is None:
+            return []
+
+        tid = self._make_tid(user_id, session_id)
+        state = agent._graph.get_state({"configurable": {"thread_id": tid}})
+        if not state or not state.values:
+            return []
+
+        user_task = state.values.get("user_task", "")
+        final_answer = state.values.get("synthesized_answer", "")
+        visible = []
+        if user_task:
+            visible.append(HumanMessage(content=str(user_task)))
+        if final_answer:
+            visible.append(AIMessage(content=str(final_answer)))
+        return visible
 
     # ── 注册 subagent ──
 

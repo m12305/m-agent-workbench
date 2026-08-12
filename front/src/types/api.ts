@@ -1,6 +1,7 @@
 export type Role = 'user' | 'admin'
 export type KnowledgeScope = 'private' | 'shared' | 'hybrid'
 export type DocumentScope = 'private' | 'shared'
+export type SessionType = 'chat' | 'multi_agent'
 
 export interface Identity {
   user_id: string
@@ -31,6 +32,7 @@ export interface CreatedApiKey {
 
 export interface Session {
   session_id: string
+  session_type: SessionType
   title: string | null
   message_count: number
   created_at: string

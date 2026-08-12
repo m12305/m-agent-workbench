@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from ..deps import get_identity, get_session_service
+from ..exceptions import NotFoundError
 from ..repositories.base import Identity
 from ..services.multi_agent_service import MultiAgentService
 from ..services.session_service import SessionService
@@ -82,14 +83,13 @@ async def multi_agent_chat_stream(
     # 创建或验证会话
     session_id = body.session_id
     if session_id:
-        session = await session_service.get_session(session_id)
-        if session is None or session.user_id != identity.user_id:
-            return EventSourceResponse(
-                _error_stream("SESSION_NOT_FOUND", "会话不存在或无权访问")
-            )
+        await session_service.require_session(
+            identity.user_id, session_id, "multi_agent",
+        )
     else:
         session = await session_service.create_session(
             user_id=identity.user_id,
+            session_type="multi_agent",
             title=body.query[:50],
         )
         session_id = session.session_id
@@ -161,8 +161,11 @@ async def cancel_multi_agent_run(
     session_service: SessionService = Depends(get_session_service),
 ):
     """Cooperatively cancel the active run owned by the current user."""
-    session = await session_service.get_session(session_id)
-    if session is None or session.user_id != identity.user_id:
+    try:
+        await session_service.require_session(
+            identity.user_id, session_id, "multi_agent",
+        )
+    except NotFoundError:
         return {"cancelled": False}
     cancelled = multi_agent_service.cancel_run(
         multi_agent_service._make_tid(identity.user_id, session_id)

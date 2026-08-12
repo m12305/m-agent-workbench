@@ -15,6 +15,34 @@
       </div>
       <p class="ma-agent-description">主智能体负责理解与调度，子智能体按计划执行，最后统一综合结果。</p>
 
+      <section class="ma-history" aria-labelledby="ma-history-title">
+        <header>
+          <h2 id="ma-history-title">历史任务</h2>
+          <button type="button" aria-label="刷新历史任务" title="刷新" @click="loadMultiAgentSessions()">
+            <ClockCounterClockwise :size="15" aria-hidden="true" />
+          </button>
+        </header>
+        <p v-if="sessionsLoading" class="ma-history-state">正在加载…</p>
+        <p v-else-if="sessionsError" class="ma-history-state is-error">{{ sessionsError }}</p>
+        <p v-else-if="!multiAgentSessions.length" class="ma-history-state">暂无历史任务</p>
+        <div v-else class="ma-history-list">
+          <button
+            v-for="session in multiAgentSessions"
+            :key="session.session_id"
+            class="ma-history-item"
+            :class="{ 'is-active': activeSessionId === session.session_id }"
+            type="button"
+            :disabled="running || Boolean(loadingSessionId)"
+            @click="loadHistoricalSession(session)"
+          >
+            <span>
+              <strong>{{ session.title || '未命名任务' }}</strong>
+              <small>{{ formatSessionTime(session.updated_at) }}</small>
+            </span>
+          </button>
+        </div>
+      </section>
+
       <ol class="ma-pipeline" aria-label="执行阶段">
         <li
           v-for="(stage, index) in stageDefinitions"
@@ -243,7 +271,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, type Component } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, type Component } from 'vue'
 import {
   PhArrowLeft as ArrowLeft,
   PhBrain as Brain,
@@ -251,6 +279,7 @@ import {
   PhCheck as Check,
   PhCheckCircle as CheckCircle,
   PhCircleNotch as CircleNotch,
+  PhClockCounterClockwise as ClockCounterClockwise,
   PhCopy as Copy,
   PhGitBranch as GitBranch,
   PhGraph as GraphIcon,
@@ -267,7 +296,8 @@ import {
 } from '@phosphor-icons/vue'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { getSavedApiBase, STORAGE_KEYS } from '../api/client'
+import { api, getSavedApiBase, STORAGE_KEYS } from '../api/client'
+import type { Session } from '../types/api'
 
 marked.setOptions({ breaks: true, gfm: true })
 
@@ -323,6 +353,10 @@ const runStartedAt = ref(0)
 const shouldAutoScroll = ref(true)
 const activeController = ref<AbortController | null>(null)
 const activeSessionId = ref('')
+const multiAgentSessions = ref<Session[]>([])
+const sessionsLoading = ref(false)
+const sessionsError = ref('')
+const loadingSessionId = ref('')
 let eventSequence = 0
 let copyTimer: number | undefined
 
@@ -582,6 +616,7 @@ function resetRun() {
   if (running.value) stopRun()
   events.value = []
   currentTask.value = ''
+  activeSessionId.value = ''
   shouldAutoScroll.value = true
   nextTick(() => composerInput.value?.focus())
 }
@@ -598,6 +633,54 @@ function stopRun() {
     ).catch(() => undefined)
   }
   activeController.value?.abort()
+}
+
+function formatSessionTime(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+}
+
+async function loadMultiAgentSessions(showError = true) {
+  sessionsLoading.value = true
+  sessionsError.value = ''
+  try {
+    multiAgentSessions.value = await api.listSessions('multi_agent')
+  } catch (error) {
+    sessionsError.value = error instanceof Error ? error.message : '历史任务加载失败'
+    if (!showError) sessionsError.value = ''
+  } finally {
+    sessionsLoading.value = false
+  }
+}
+
+async function loadHistoricalSession(session: Session) {
+  if (running.value) return
+  loadingSessionId.value = session.session_id
+  activeSessionId.value = session.session_id
+  events.value = []
+  currentTask.value = session.title || '未命名任务'
+  runStartedAt.value = new Date(session.created_at).getTime() || Date.now()
+  try {
+    const messages = await api.getMessages(session.session_id)
+    const userMessage = messages.find((message) => message.role === 'user')
+    const answer = [...messages].reverse().find((message) => message.role === 'assistant')
+    currentTask.value = userMessage?.content || currentTask.value
+    if (answer?.content) pushEvent('synthesis_done', { answer: answer.content })
+    pushEvent('done', { session_id: session.session_id })
+    scrollToBottom(true)
+  } catch (error) {
+    pushEvent('error', {
+      message: error instanceof Error ? error.message : '无法加载历史任务',
+    })
+  } finally {
+    loadingSessionId.value = ''
+  }
 }
 
 async function copyAnswer() {
@@ -707,9 +790,14 @@ async function submitTask() {
   } finally {
     if (activeController.value === controller) activeController.value = null
     running.value = false
+    await loadMultiAgentSessions(false)
     scrollToBottom()
   }
 }
+
+onMounted(() => {
+  void loadMultiAgentSessions(false)
+})
 
 onBeforeUnmount(() => {
   activeController.value?.abort()
@@ -774,8 +862,23 @@ onBeforeUnmount(() => {
 .ma-agent-intro h1 { margin-top: 2px; font-size: 1.04rem; letter-spacing: -0.025em; }
 .ma-agent-description { margin-top: 14px; color: var(--text-soft); font-size: 0.73rem; line-height: 1.65; }
 
+.ma-history { min-height: 0; margin-top: 22px; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 9px; }
+.ma-history > header { display: flex; align-items: center; justify-content: space-between; }
+.ma-history h2 { color: var(--text-soft); font-size: 0.7rem; }
+.ma-history > header button { width: 27px; height: 27px; display: grid; place-items: center; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; }
+.ma-history > header button:hover { background: var(--surface-hover); color: var(--text); }
+.ma-history-list { max-height: 176px; overflow-y: auto; display: grid; gap: 4px; }
+.ma-history-item { min-width: 0; min-height: 48px; padding: 7px 8px 7px 10px; display: flex; align-items: center; gap: 8px; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); text-align: left; cursor: pointer; }
+.ma-history-item:hover, .ma-history-item.is-active { border-color: var(--line); background: var(--surface-hover); color: var(--text); }
+.ma-history-item:disabled { cursor: default; opacity: 0.66; }
+.ma-history-item > span { min-width: 0; flex: 1; display: grid; gap: 3px; }
+.ma-history-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-soft); font-size: 0.66rem; }
+.ma-history-item small { font-size: 0.58rem; }
+.ma-history-state { padding: 8px 2px; color: var(--text-muted); font-size: 0.63rem; }
+.ma-history-state.is-error { color: var(--danger); }
+
 .ma-pipeline {
-  margin: 30px 0 0;
+  margin: 22px 0 0;
   padding: 0;
   list-style: none;
   display: grid;
@@ -1104,6 +1207,7 @@ onBeforeUnmount(() => {
   .ma-back-link { display: none; }
   .ma-agent-intro { margin: 0; }
   .ma-agent-description, .ma-architecture { display: none; }
+  .ma-history { display: none; }
   .ma-pipeline { margin: 0; grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .ma-pipeline li { min-height: auto; grid-template-columns: 30px minmax(0, 1fr); gap: 7px; }
   .ma-pipeline li:not(:last-child)::after { width: auto; height: 1px; top: 15px; right: -1px; bottom: auto; left: 29px; }

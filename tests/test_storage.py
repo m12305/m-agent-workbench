@@ -7,7 +7,7 @@ import pytest
 
 @pytest.fixture
 def local_storage():
-    from src.server.storage import LocalStorage
+    from src.rag.storage import LocalStorage
     with tempfile.TemporaryDirectory() as tmp:
         storage = LocalStorage(base_dir=tmp)
         yield storage
@@ -72,7 +72,7 @@ def test_presigned_url_local_returns_none(local_storage):
 
 def test_multipart_upload_local(local_storage):
     """本地分片上传退化为简单拼接写入"""
-    from src.server.storage.base import MultipartUpload
+    from src.rag.storage.base import MultipartUpload
 
     key = "test/multipart.bin"
     upload = local_storage.initiate_multipart_upload(key)

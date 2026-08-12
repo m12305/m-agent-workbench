@@ -219,9 +219,11 @@ export const api = {
   }),
   revokeApiKey: (prefix: string) => request<void>(`/api-keys/${encodeURIComponent(prefix)}`, { method: 'DELETE' }),
 
-  listSessions: () => request<Session[]>('/sessions'),
-  createSession: (title?: string | null) => request<Session>('/sessions', {
-    method: 'POST', body: jsonBody({ title: title || null }),
+  listSessions: (sessionType: Session['session_type']) => request<Session[]>(
+    `/sessions?session_type=${encodeURIComponent(sessionType)}`,
+  ),
+  createSession: (title: string | null, sessionType: Session['session_type']) => request<Session>('/sessions', {
+    method: 'POST', body: jsonBody({ title: title || null, session_type: sessionType }),
   }),
   getMessages: (sessionId: string) => request<Message[]>(`/sessions/${encodeURIComponent(sessionId)}/messages`),
   renameSession: (sessionId: string, title: string | null) => request<Session>(

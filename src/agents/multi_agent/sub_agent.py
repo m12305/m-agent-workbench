@@ -99,6 +99,7 @@ class SubAgent(BaseAgent):
         description:     能力描述 (LLM 选择依据)
         capabilities:    能力标签列表
         api_tools:       本 subagent 专属的 L4 API tools 列表
+        api_tools_meta:  {tool_name: {category, tags, version}} 工具版本元数据
         model_kwargs:    传递给 get_model() 的额外参数
         store_type:      存储类型: "memory" | "sqlite"
         sqlite_path:     SQLite 路径 (store_type="sqlite" 时)
@@ -111,6 +112,7 @@ class SubAgent(BaseAgent):
         description: str = "通用子智能体",
         capabilities: list[str] | None = None,
         api_tools: list | None = None,
+        api_tools_meta: dict[str, dict] | None = None,
         model_kwargs: dict | None = None,
         store_type: str = "memory",
         sqlite_path: str | None = None,
@@ -121,6 +123,7 @@ class SubAgent(BaseAgent):
         self.description = description
         self.capabilities = capabilities or []
         self._api_tools = api_tools or []
+        self._api_tools_meta = api_tools_meta or {}
         self._model_kwargs = model_kwargs or {}
         self._store_type = store_type
         self._sqlite_path = sqlite_path
@@ -150,7 +153,10 @@ class SubAgent(BaseAgent):
         self.tool_registry.register_with_meta(BUILTIN_TOOLS, BUILTIN_TOOLS_META)
         # L4: 本 subagent 专属 API tools
         if self._api_tools:
-            self.tool_registry.register_many(self._api_tools, category="backend_api")
+            if self._api_tools_meta:
+                self.tool_registry.register_with_meta(self._api_tools, self._api_tools_meta)
+            else:
+                self.tool_registry.register_many(self._api_tools, category="backend_api")
         logger.info(
             "ToolRegistry: %d tools (L1=%d, L4=%d)",
             self.tool_registry.tool_count,

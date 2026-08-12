@@ -52,6 +52,7 @@ class MeResponse(BaseModel):
 # ═══════════════════════════════════════════════════════════════
 
 class CreateSessionRequest(BaseModel):
+    session_type: Literal["chat", "multi_agent"]
     title: str | None = Field(default=None, max_length=200)
 
 
@@ -61,6 +62,7 @@ class UpdateSessionRequest(BaseModel):
 
 class SessionResponse(BaseModel):
     session_id: str
+    session_type: Literal["chat", "multi_agent"]
     title: str | None
     message_count: int
     created_at: datetime

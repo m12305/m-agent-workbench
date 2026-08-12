@@ -1,10 +1,10 @@
 """Chunker 测试"""
 
-from src.server.parsing.base import ParsedDocument, ParsedPage
+from src.rag.parsing.base import ParsedDocument, ParsedPage
 
 
 def test_paragraph_chunker():
-    from src.server.chunking import ParagraphChunker
+    from src.rag.chunking import ParagraphChunker
     parsed = ParsedDocument(
         text="段落一。\n\n段落二。\n\n段落三。",
         pages=[ParsedPage(page_number=1, text="段落一。\n\n段落二。\n\n段落三。")],
@@ -17,7 +17,7 @@ def test_paragraph_chunker():
 
 
 def test_markdown_chunker():
-    from src.server.chunking import MarkdownChunker
+    from src.rag.chunking import MarkdownChunker
     parsed = ParsedDocument(
         text="## 第一节\n\n内容A。\n\n## 第二节\n\n内容B。",
         pages=[ParsedPage(page_number=1, text="## 第一节\n\n内容A。\n\n## 第二节\n\n内容B。")],
@@ -31,7 +31,7 @@ def test_markdown_chunker():
 
 
 def test_pdf_chunker():
-    from src.server.chunking import PDFChunker
+    from src.rag.chunking import PDFChunker
     parsed = ParsedDocument(
         pages=[
             ParsedPage(page_number=1, text="第1页内容A。\n\n第1页内容B。"),
@@ -50,7 +50,7 @@ def test_pdf_chunker():
 
 
 def test_chunker_registry_defaults():
-    from src.server.chunking import (
+    from src.rag.chunking import (
         ChunkerRegistry, ParagraphChunker, MarkdownChunker, PDFChunker,
     )
     reg = ChunkerRegistry()
@@ -60,7 +60,7 @@ def test_chunker_registry_defaults():
 
 
 def test_chunker_registry_override():
-    from src.server.chunking import ChunkerRegistry, ParagraphChunker
+    from src.rag.chunking import ChunkerRegistry, ParagraphChunker
     reg = ChunkerRegistry()
     custom = ParagraphChunker()
     reg.override("text/plain", custom)
@@ -68,7 +68,7 @@ def test_chunker_registry_override():
 
 
 def test_semantic_chunker_not_implemented():
-    from src.server.chunking import SemanticChunker
+    from src.rag.chunking import SemanticChunker
     parsed = ParsedDocument(text="test")
     chunker = SemanticChunker()
     try:

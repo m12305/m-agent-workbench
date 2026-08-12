@@ -119,6 +119,14 @@ class ChatService:
             logger.debug("读取会话消息失败 (新会话?): %s", e)
             return []
 
+    def get_session_messages(self, user_id: str, session_id: str) -> list:
+        """Return all user-visible messages for the session history API."""
+        return self._get_session_messages(
+            user_id=user_id,
+            session_id=session_id,
+            max_rounds=1_000_000,
+        )
+
     async def chat(
         self, user_id: str, session_id: str, query: str, scope: str = "hybrid"
     ) -> str:

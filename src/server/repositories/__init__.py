@@ -2,7 +2,7 @@
 from .base import (
     UserRepository, ApiKeyRepository, SessionRepository,
     DocumentRepository, ChunkRepository, TaskRepository,
-    User, ApiKey, Session, Identity,
+    User, ApiKey, Session, SessionType, Identity,
     Document, ChunkRecord, TaskRecord,
 )
 from .memory import (
@@ -19,7 +19,7 @@ from .sqlite import (
 __all__ = [
     "UserRepository", "ApiKeyRepository", "SessionRepository",
     "DocumentRepository", "ChunkRepository", "TaskRepository",
-    "User", "ApiKey", "Session", "Identity",
+    "User", "ApiKey", "Session", "SessionType", "Identity",
     "Document", "ChunkRecord", "TaskRecord",
     # 内存实现
     "InMemoryUserRepo", "InMemoryApiKeyRepo", "InMemorySessionRepo",

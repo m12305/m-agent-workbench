@@ -3,7 +3,7 @@
 import logging
 
 from .base import Parser
-from ..exceptions import AppError
+from ...server.exceptions import AppError
 
 logger = logging.getLogger("server.parser_registry")
 

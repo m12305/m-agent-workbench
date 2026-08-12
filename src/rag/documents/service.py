@@ -11,7 +11,7 @@ from pypdf import PdfReader
 
 from ..milvus import MilvusClient
 
-from ..repositories.base import (
+from ...server.repositories.base import (
     DocumentRepository, ChunkRepository,
     Document, Identity,
 )
@@ -162,7 +162,7 @@ class DocumentService:
         if not doc:
             return
         if doc.user_id != user_id:
-            from ..exceptions import NotFoundError
+            from ...server.exceptions import NotFoundError
             raise NotFoundError("文档", document_id)
 
         await self._storage.delete(doc.storage_key)

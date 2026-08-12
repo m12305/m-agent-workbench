@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from .api import api_router
 from .middleware import LoggingMiddleware, AuthMiddleware, setup_cors
 from .services import AuthService, SessionService, ChatService
-from .services.retrieval_service import RetrievalService
+from ..rag.retrieval import RetrievalService
 from .services.multi_agent_service import MultiAgentService
 from .repositories import (
     InMemoryUserRepo, InMemoryApiKeyRepo, InMemorySessionRepo,
@@ -27,17 +27,17 @@ from .repositories import (
     SqliteUserRepo, SqliteApiKeyRepo, SqliteSessionRepo,
     SqliteDocumentRepo, SqliteChunkRepo, SqliteTaskRepo,
 )
-from .storage import create_storage
-from .parsing import (
+from ..rag.storage import create_storage
+from ..rag.parsing import (
     ParserRegistry, TextParser, MarkdownParser, MinerUParser,
     MinerUAgentParser,
     register_placeholders,
 )
-from .chunking import ChunkerRegistry
-from .embedding import BailianEmbedding
-from .milvus import MilvusClient
-from .tasks import InProcessTaskQueue, TaskWorker
-from .documents import DocumentService
+from ..rag.chunking import ChunkerRegistry
+from ..rag.embedding import BailianEmbedding
+from ..rag.milvus import MilvusClient
+from ..rag.tasks import InProcessTaskQueue, TaskWorker
+from ..rag.documents import DocumentService
 from .exceptions import AppError
 from .schemas import ErrorResponse, ErrorDetail
 
@@ -165,7 +165,7 @@ async def lifespan(app: FastAPI):
 
         # ── 高阶检索 (包装基础检索 + Query 改写) ──
         if rewrite_llm:
-            from .services.advanced_retrieval import AdvancedRetrievalService
+            from ..rag.retrieval import AdvancedRetrievalService
             retrieval = AdvancedRetrievalService(retrieval, rewrite_llm)
             logger.info("高阶检索服务已启用 (Query 改写 + 多路检索 + RRF 合并)")
 

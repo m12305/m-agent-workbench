@@ -9,6 +9,7 @@ from .base import (
     User,
     ApiKey,
     Session,
+    SessionType,
     Identity,
     Document,
     ChunkRecord,
@@ -79,11 +80,14 @@ class InMemorySessionRepo:
         self._sessions: dict[str, Session] = {}
         self._lock = asyncio.Lock()
 
-    async def create(self, user_id: str, title: str | None) -> Session:
+    async def create(
+        self, user_id: str, title: str | None, session_type: SessionType,
+    ) -> Session:
         async with self._lock:
             session = Session(
                 session_id=str(uuid.uuid4()),
                 user_id=user_id,
+                session_type=session_type,
                 title=title,
             )
             self._sessions[session.session_id] = session
@@ -92,10 +96,12 @@ class InMemorySessionRepo:
     async def get(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
 
-    async def list_by_user(self, user_id: str) -> list[Session]:
+    async def list_by_user(
+        self, user_id: str, session_type: SessionType,
+    ) -> list[Session]:
         return [
             s for s in self._sessions.values()
-            if s.user_id == user_id
+            if s.user_id == user_id and s.session_type == session_type
         ]
 
     async def update(self, session_id: str, **kwargs) -> Session | None:

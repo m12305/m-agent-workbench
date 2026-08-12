@@ -173,7 +173,7 @@ export const useAppStore = defineStore('app', {
       this.sessionsLoading = true
       this.sessionsError = ''
       try {
-        this.sessions = await api.listSessions()
+        this.sessions = await api.listSessions('chat')
         if (this.activeSessionId && !this.sessions.some((item) => item.session_id === this.activeSessionId)) {
           this.activeSessionId = null
         }
@@ -187,7 +187,7 @@ export const useAppStore = defineStore('app', {
     },
 
     async createSession(title?: string | null) {
-      const session = await api.createSession(title)
+      const session = await api.createSession(title || null, 'chat')
       this.sessions.unshift(session)
       this.activeSessionId = session.session_id
       return session

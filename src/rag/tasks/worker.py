@@ -6,7 +6,7 @@ import time
 import tempfile
 import logging
 
-from ..repositories.base import (
+from ...server.repositories.base import (
     DocumentRepository, ChunkRepository, ChunkRecord,
 )
 

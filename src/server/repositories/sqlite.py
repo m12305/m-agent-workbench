@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +19,7 @@ from typing import Awaitable, Callable, TypeVar
 import aiosqlite
 
 from .base import (
-    User, ApiKey, Session, Identity,
+    User, ApiKey, Session, SessionType, Identity,
     Document, ChunkRecord, TaskRecord,
 )
 
@@ -89,12 +90,77 @@ class SqliteDb:
         try:
             await conn.execute("PRAGMA journal_mode=WAL")
             await conn.executescript(SCHEMA_SQL)
+            await self._migrate_sessions_schema(conn)
             await conn.executescript(LEGACY_STATIC_KEY_MIGRATION_SQL)
             await conn.commit()
         finally:
             if conn is not self._keeper:
                 await conn.close()
         self._initialized = True
+
+    async def _migrate_sessions_schema(self, conn: aiosqlite.Connection) -> None:
+        """Add session typing and classify legacy multi-agent sessions when possible."""
+        cursor = await conn.execute("PRAGMA table_info(sessions)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        await cursor.close()
+        if "session_type" not in columns:
+            await conn.execute(
+                "ALTER TABLE sessions ADD COLUMN session_type TEXT NOT NULL DEFAULT 'chat'"
+            )
+
+        await conn.execute(
+            "UPDATE sessions SET session_type = 'chat' "
+            "WHERE session_type IS NULL OR session_type NOT IN ('chat', 'multi_agent')"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_user_type_updated "
+            "ON sessions(user_id, session_type, updated_at DESC)"
+        )
+
+        await self._classify_legacy_multi_agent_sessions(conn)
+
+    async def _classify_legacy_multi_agent_sessions(
+        self, conn: aiosqlite.Connection,
+    ) -> None:
+        """Best-effort backfill using thread ids found in legacy agent databases."""
+        if self._db_path == ":memory:":
+            return
+
+        session_ids: set[str] = set()
+        db_dir = Path(self._db_path).resolve().parent
+        for agent_db in db_dir.glob("multi_agent*.db"):
+            suffix = agent_db.stem.removeprefix("multi_agent-")
+            is_main_agent_db = (
+                agent_db.stem == "multi_agent"
+                or (len(suffix) == 16 and all(char in "0123456789abcdef" for char in suffix))
+            )
+            if not is_main_agent_db:
+                continue
+            try:
+                legacy = sqlite3.connect(
+                    f"file:{agent_db.as_posix()}?mode=ro", uri=True, timeout=1.0,
+                )
+                try:
+                    rows = legacy.execute(
+                        "SELECT DISTINCT thread_id FROM checkpoints"
+                    ).fetchall()
+                finally:
+                    legacy.close()
+            except sqlite3.Error as exc:
+                logger.warning("读取旧 Multi-Agent 会话失败 (%s): %s", agent_db, exc)
+                continue
+
+            for (thread_id,) in rows:
+                if isinstance(thread_id, str) and ":" in thread_id:
+                    session_ids.add(thread_id.rsplit(":", 1)[-1])
+
+        if session_ids:
+            await conn.executemany(
+                "UPDATE sessions SET session_type = 'multi_agent' "
+                "WHERE session_id = ?",
+                [(session_id,) for session_id in session_ids],
+            )
+            logger.info("已识别 %d 个旧 Multi-Agent 会话", len(session_ids))
 
     async def close(self) -> None:
         """关闭数据库连接"""
@@ -204,6 +270,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE TABLE IF NOT EXISTS sessions (
     session_id    TEXT PRIMARY KEY,
     user_id       TEXT NOT NULL,
+    session_type  TEXT NOT NULL CHECK(session_type IN ('chat', 'multi_agent')),
     title         TEXT,
     message_count INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL,
@@ -443,16 +510,20 @@ class SqliteSessionRepo:
     def __init__(self, db: SqliteDb):
         self._db = db
 
-    async def create(self, user_id: str, title: str | None) -> Session:
+    async def create(
+        self, user_id: str, title: str | None, session_type: SessionType,
+    ) -> Session:
         session_id = str(uuid.uuid4())
         now = _now()
         await self._db.execute(
-            "INSERT INTO sessions (session_id, user_id, title, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (session_id, user_id, title, now, now),
+            "INSERT INTO sessions "
+            "(session_id, user_id, session_type, title, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, user_id, session_type, title, now, now),
         )
         return Session(
-            session_id=session_id, user_id=user_id, title=title,
+            session_id=session_id, user_id=user_id,
+            session_type=session_type, title=title,
             message_count=0,
             created_at=datetime.fromisoformat(now),
             updated_at=datetime.fromisoformat(now),
@@ -465,19 +536,24 @@ class SqliteSessionRepo:
             return None
         return Session(
             session_id=row["session_id"], user_id=row["user_id"],
+            session_type=row["session_type"],
             title=row["title"], message_count=row["message_count"],
             created_at=_parse_dt(row["created_at"]),
             updated_at=_parse_dt(row["updated_at"]),
         )
 
-    async def list_by_user(self, user_id: str) -> list[Session]:
+    async def list_by_user(
+        self, user_id: str, session_type: SessionType,
+    ) -> list[Session]:
         rows = await self._db.fetchall(
-            "SELECT * FROM sessions WHERE user_id = ? ORDER BY updated_at DESC",
-            (user_id,),
+            "SELECT * FROM sessions WHERE user_id = ? AND session_type = ? "
+            "ORDER BY updated_at DESC",
+            (user_id, session_type),
         )
         return [
             Session(
                 session_id=r["session_id"], user_id=r["user_id"],
+                session_type=r["session_type"],
                 title=r["title"], message_count=r["message_count"],
                 created_at=_parse_dt(r["created_at"]),
                 updated_at=_parse_dt(r["updated_at"]),

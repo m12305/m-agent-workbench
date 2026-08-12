@@ -1,7 +1,7 @@
 """会话服务 — 会话元数据管理"""
 
 import logging
-from ..repositories.base import SessionRepository, Session
+from ..repositories.base import SessionRepository, Session, SessionType
 from ..exceptions import NotFoundError
 
 logger = logging.getLogger("server.session_service")
@@ -19,10 +19,15 @@ class SessionService:
         self._repo = session_repo
 
     async def create_session(
-        self, user_id: str, title: str | None = None
+        self, user_id: str, session_type: SessionType, title: str | None = None,
     ) -> Session:
-        session = await self._repo.create(user_id=user_id, title=title)
-        logger.info("会话创建: %s (user=%s)", session.session_id, user_id)
+        session = await self._repo.create(
+            user_id=user_id, title=title, session_type=session_type,
+        )
+        logger.info(
+            "会话创建: %s (user=%s, type=%s)",
+            session.session_id, user_id, session_type,
+        )
         return session
 
     async def get_session(self, session_id: str) -> Session:
@@ -31,8 +36,19 @@ class SessionService:
             raise NotFoundError("会话", session_id)
         return session
 
-    async def list_sessions(self, user_id: str) -> list[Session]:
-        return await self._repo.list_by_user(user_id)
+    async def list_sessions(
+        self, user_id: str, session_type: SessionType,
+    ) -> list[Session]:
+        return await self._repo.list_by_user(user_id, session_type)
+
+    async def require_session(
+        self, user_id: str, session_id: str, session_type: SessionType,
+    ) -> Session:
+        """Return an owned session only when it belongs to the requested agent."""
+        session = await self.get_session(session_id)
+        if session.user_id != user_id or session.session_type != session_type:
+            raise NotFoundError("会话", session_id)
+        return session
 
     async def delete_session(self, user_id: str, session_id: str) -> None:
         session = await self.get_session(session_id)

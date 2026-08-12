@@ -1,6 +1,6 @@
 """文档相关错误码 — 复用 AppError"""
 
-from ..exceptions import AppError
+from ...server.exceptions import AppError
 
 
 class UnsupportedFormatError(AppError):

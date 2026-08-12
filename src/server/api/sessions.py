@@ -1,14 +1,34 @@
 """CRUD /api/v1/sessions"""
 
+from datetime import datetime
+from typing import Literal
+
 from fastapi import APIRouter, Depends
 
 from ..schemas import CreateSessionRequest, UpdateSessionRequest, SessionResponse, MessageView
-from ..deps import get_identity, get_session_service, get_chat_service
-from ..repositories.base import Identity
+from ..deps import (
+    get_identity,
+    get_session_service,
+    get_chat_service,
+    get_multi_agent_service,
+)
+from ..repositories.base import Identity, Session
 from ..services.session_service import SessionService
 from ..services.chat_service import ChatService
+from ..services.multi_agent_service import MultiAgentService
 
 router = APIRouter()
+
+
+def _session_response(session: Session) -> SessionResponse:
+    return SessionResponse(
+        session_id=session.session_id,
+        session_type=session.session_type,
+        title=session.title,
+        message_count=session.message_count,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
 
 
 @router.post(
@@ -24,15 +44,10 @@ async def create_session(
     """创建新会话"""
     session = await session_service.create_session(
         user_id=identity.user_id,
+        session_type=body.session_type,
         title=body.title,
     )
-    return SessionResponse(
-        session_id=session.session_id,
-        title=session.title,
-        message_count=session.message_count,
-        created_at=session.created_at,
-        updated_at=session.updated_at,
-    )
+    return _session_response(session)
 
 
 @router.get(
@@ -40,21 +55,15 @@ async def create_session(
     response_model=list[SessionResponse],
 )
 async def list_sessions(
+    session_type: Literal["chat", "multi_agent"],
     identity: Identity = Depends(get_identity),
     session_service: SessionService = Depends(get_session_service),
 ):
-    """列出当前用户的所有会话"""
-    sessions = await session_service.list_sessions(identity.user_id)
-    return [
-        SessionResponse(
-            session_id=s.session_id,
-            title=s.title,
-            message_count=s.message_count,
-            created_at=s.created_at,
-            updated_at=s.updated_at,
-        )
-        for s in sessions
-    ]
+    """按智能体类型列出当前用户的会话"""
+    sessions = await session_service.list_sessions(
+        identity.user_id, session_type,
+    )
+    return [_session_response(session) for session in sessions]
 
 
 @router.get(
@@ -66,6 +75,7 @@ async def get_messages(
     identity: Identity = Depends(get_identity),
     session_service: SessionService = Depends(get_session_service),
     chat_service: ChatService = Depends(get_chat_service),
+    multi_agent_service: MultiAgentService = Depends(get_multi_agent_service),
 ):
     """获取会话消息历史"""
     # 验证会话属于当前用户
@@ -74,30 +84,28 @@ async def get_messages(
         from ..exceptions import NotFoundError
         raise NotFoundError("会话", session_id)
 
-    # 从 ChatAgent Checkpointer 读取消息
-    agent = chat_service._get_or_create_agent(identity.user_id)
-    tid = chat_service._make_tid(identity.user_id, session_id)
-    info = agent.get_session_info(tid)
+    if session.session_type == "chat":
+        stored_messages = chat_service.get_session_messages(
+            identity.user_id, session_id,
+        )
+    else:
+        stored_messages = multi_agent_service.get_session_messages(
+            identity.user_id, session_id,
+        )
 
     messages: list[MessageView] = []
-    if info["has_state"]:
-        config = {"configurable": {"thread_id": tid}}
-        state = agent._graph.get_state(config)
-        from langchain_core.messages import HumanMessage, AIMessage
-        from datetime import datetime
-
-        stored_messages = state.values.get("messages", [])
-        for msg in chat_service.visible_messages(stored_messages):
-            if isinstance(msg, HumanMessage):
-                messages.append(MessageView(
-                    role="user", content=str(msg.content),
-                    created_at=datetime.utcnow(),
-                ))
-            elif isinstance(msg, AIMessage):
-                messages.append(MessageView(
-                    role="assistant", content=str(msg.content),
-                    created_at=datetime.utcnow(),
-                ))
+    from langchain_core.messages import HumanMessage, AIMessage
+    for msg in stored_messages:
+        if isinstance(msg, HumanMessage):
+            messages.append(MessageView(
+                role="user", content=str(msg.content),
+                created_at=datetime.utcnow(),
+            ))
+        elif isinstance(msg, AIMessage):
+            messages.append(MessageView(
+                role="assistant", content=str(msg.content),
+                created_at=datetime.utcnow(),
+            ))
     return messages
 
 
@@ -115,13 +123,7 @@ async def update_session(
     session = await session_service.rename_session(
         identity.user_id, session_id, body.title,
     )
-    return SessionResponse(
-        session_id=session.session_id,
-        title=session.title,
-        message_count=session.message_count,
-        created_at=session.created_at,
-        updated_at=session.updated_at,
-    )
+    return _session_response(session)
 
 
 @router.delete(

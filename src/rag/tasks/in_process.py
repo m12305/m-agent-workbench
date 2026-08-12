@@ -7,7 +7,7 @@ from datetime import datetime
 
 from .base import TaskStatus, TaskInfo
 from .worker import TaskWorker
-from ..repositories.base import TaskRepository
+from ...server.repositories.base import TaskRepository
 
 logger = logging.getLogger("server.task_queue")
 

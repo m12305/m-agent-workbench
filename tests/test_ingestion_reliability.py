@@ -17,10 +17,10 @@ from src.server.repositories.sqlite import (
     SqliteDocumentRepo,
     SqliteTaskRepo,
 )
-from src.server.milvus.client import SearchResult
-from src.server.services.retrieval_service import RetrievalService
-from src.server.tasks.in_process import InProcessTaskQueue
-from src.server.tasks.worker import TaskWorker
+from src.rag.milvus.client import SearchResult
+from src.rag.retrieval import RetrievalService
+from src.rag.tasks import InProcessTaskQueue
+from src.rag.tasks import TaskWorker
 
 
 def make_document(document_id: str = "doc-1") -> Document:

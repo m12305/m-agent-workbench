@@ -27,13 +27,14 @@ async def chat(
     """同步问答 — 等待完整回答后返回"""
     # 获取或创建会话
     if body.session_id:
-        session = await session_service.get_session(body.session_id)
-        if session.user_id != identity.user_id:
-            from ..exceptions import NotFoundError
-            raise NotFoundError("会话", body.session_id)
+        await session_service.require_session(
+            identity.user_id, body.session_id, "chat",
+        )
         session_id = body.session_id
     else:
-        session = await session_service.create_session(identity.user_id)
+        session = await session_service.create_session(
+            identity.user_id, "chat",
+        )
         session_id = session.session_id
 
     # 调用 Agent
@@ -66,13 +67,14 @@ async def chat_stream(
     """SSE 流式问答 — 逐 token 输出"""
     # 获取或创建会话
     if body.session_id:
-        session = await session_service.get_session(body.session_id)
-        if session.user_id != identity.user_id:
-            from ..exceptions import NotFoundError
-            raise NotFoundError("会话", body.session_id)
+        await session_service.require_session(
+            identity.user_id, body.session_id, "chat",
+        )
         session_id = body.session_id
     else:
-        session = await session_service.create_session(identity.user_id)
+        session = await session_service.create_session(
+            identity.user_id, "chat",
+        )
         session_id = session.session_id
 
     async def event_generator():

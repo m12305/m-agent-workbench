@@ -18,8 +18,8 @@ from ..schemas import (
     DocumentUploadResponse,
     TaskResponse,
 )
-from .service import DocumentService, MAX_FILE_SIZE
-from .errors import FileTooLargeError, UnsupportedFormatError
+from ...rag.documents.service import DocumentService, MAX_FILE_SIZE
+from ...rag.documents.errors import FileTooLargeError, UnsupportedFormatError
 
 logger = logging.getLogger("server.document_api")
 router = APIRouter()

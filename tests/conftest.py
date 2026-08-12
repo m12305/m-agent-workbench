@@ -22,14 +22,14 @@ async def client(tmp_path, monkeypatch) -> AsyncIterator[AsyncClient]:
     monkeypatch.setenv("MINERU_API_KEY", "")
 
     from src.server.main import app
-    from src.server.documents.service import DocumentService
+    from src.rag.documents import DocumentService
     from src.server.repositories.memory import (
         InMemoryChunkRepo,
         InMemoryDocumentRepo,
         InMemoryTaskRepo,
     )
-    from src.server.storage.local import LocalStorage
-    from src.server.tasks.in_process import InProcessTaskQueue
+    from src.rag.storage import LocalStorage
+    from src.rag.tasks import InProcessTaskQueue
 
     class TestTaskWorker:
         async def execute(self, document_id: str, task_id: str | None = None) -> None:

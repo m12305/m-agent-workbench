@@ -68,7 +68,7 @@ def _make_mineru_zip(markdown_content: str) -> bytes:
 # ═══════════════════════════════════════════════════════════════
 
 def test_text_parser(txt_file):
-    from src.server.parsing import TextParser
+    from src.rag.parsing import TextParser
     parser = TextParser()
     result = parser.parse(txt_file, "test.txt", "text/plain")
     assert "第一段" in result.text
@@ -80,7 +80,7 @@ def test_text_parser(txt_file):
 # ═══════════════════════════════════════════════════════════════
 
 def test_markdown_parser(md_file):
-    from src.server.parsing import MarkdownParser
+    from src.rag.parsing import MarkdownParser
     parser = MarkdownParser()
     result = parser.parse(md_file, "test.md", "text/markdown")
     assert "标题" in result.text
@@ -94,7 +94,7 @@ def test_markdown_parser(md_file):
 # ═══════════════════════════════════════════════════════════════
 
 def test_parser_registry_select_by_extension():
-    from src.server.parsing import ParserRegistry, TextParser
+    from src.rag.parsing import ParserRegistry, TextParser
     reg = ParserRegistry()
     reg.register(TextParser(), extensions=[".txt"], mime_types=["text/plain"])
     parser = reg.select("text/plain", "doc.txt")
@@ -102,7 +102,7 @@ def test_parser_registry_select_by_extension():
 
 
 def test_parser_registry_select_by_mime_fallback():
-    from src.server.parsing import ParserRegistry, TextParser
+    from src.rag.parsing import ParserRegistry, TextParser
     reg = ParserRegistry()
     reg.register(TextParser(), extensions=[".txt"], mime_types=["text/plain"])
     parser = reg.select("text/plain", "doc.unknown")
@@ -110,7 +110,7 @@ def test_parser_registry_select_by_mime_fallback():
 
 
 def test_parser_registry_mime_mismatch():
-    from src.server.parsing import ParserRegistry, TextParser
+    from src.rag.parsing import ParserRegistry, TextParser
     from src.server.exceptions import AppError
     reg = ParserRegistry()
     reg.register(TextParser(), extensions=[".txt"], mime_types=["text/plain"])
@@ -119,7 +119,7 @@ def test_parser_registry_mime_mismatch():
 
 
 def test_parser_registry_unsupported():
-    from src.server.parsing import ParserRegistry, TextParser
+    from src.rag.parsing import ParserRegistry, TextParser
     from src.server.exceptions import AppError
     reg = ParserRegistry()
     reg.register(TextParser(), extensions=[".txt"], mime_types=["text/plain"])
@@ -150,7 +150,7 @@ MINERU_MARKDOWN = """# 第一章 概述
 
 def test_mineru_parser_full_flow(pdf_file):
     """模拟完整的 MinerU 批量上传→轮询→下载→解析流程"""
-    from src.server.parsing.mineru_parser import MinerUParser
+    from src.rag.parsing.mineru_parser import MinerUParser
 
     zip_bytes = _make_mineru_zip(MINERU_MARKDOWN)
 
@@ -210,7 +210,7 @@ def test_mineru_parser_full_flow(pdf_file):
 
 def test_mineru_parser_polling_retry(pdf_file):
     """测试轮询重试: 前两次 running，第三次 done"""
-    from src.server.parsing.mineru_parser import MinerUParser
+    from src.rag.parsing.mineru_parser import MinerUParser
 
     zip_bytes = _make_mineru_zip("# Test Doc\n\nContent.")
 
@@ -271,7 +271,7 @@ def test_mineru_parser_polling_retry(pdf_file):
 
 def test_mineru_parser_failure_fallback_to_pypdf(pdf_file):
     """MinerU 失败时应降级到 pypdf"""
-    from src.server.parsing.mineru_parser import MinerUParser
+    from src.rag.parsing.mineru_parser import MinerUParser
 
     with mock.patch("requests.post") as mock_post:
         mock_post.side_effect = Exception("MinerU API 不可用")
@@ -286,7 +286,7 @@ def test_mineru_parser_failure_fallback_to_pypdf(pdf_file):
 
 def test_mineru_no_api_key_fallback_to_pypdf(pdf_file):
     """未配置 API Key 时直接使用 pypdf"""
-    from src.server.parsing.mineru_parser import MinerUParser
+    from src.rag.parsing.mineru_parser import MinerUParser
 
     parser = MinerUParser(api_key="")  # 无 API Key
     result = parser.parse(pdf_file, "test.pdf", "application/pdf")
@@ -296,7 +296,7 @@ def test_mineru_no_api_key_fallback_to_pypdf(pdf_file):
 
 def test_mineru_zip_extraction():
     """测试从 MinerU zip 包中提取 full.md"""
-    from src.server.parsing.mineru_parser import MinerUParser
+    from src.rag.parsing.mineru_parser import MinerUParser
 
     parser = MinerUParser(api_key="dummy")
     zip_bytes = _make_mineru_zip("# Extracted Content\n\nBody text.")
@@ -320,8 +320,8 @@ def test_mineru_zip_extraction():
 
 def test_mineru_markdown_to_parsed_document():
     """测试 Markdown → ParsedDocument 转换"""
-    from src.server.parsing.mineru_parser import MinerUParser
-    from src.server.parsing.base import ParsedDocument
+    from src.rag.parsing.mineru_parser import MinerUParser
+    from src.rag.parsing.base import ParsedDocument
 
     parser = MinerUParser(api_key="dummy")
     result = parser._markdown_to_parsed_document(
@@ -362,7 +362,7 @@ Agent 轻量解析 API 输出纯 Markdown，无 zip 包装。
 
 def test_agent_parser_full_flow(pdf_file):
     """模拟 Agent API: 申请上传→PUT 文件→轮询→下载 markdown"""
-    from src.server.parsing.mineru_agent_parser import MinerUAgentParser
+    from src.rag.parsing.mineru_agent_parser import MinerUAgentParser
 
     with mock.patch("requests.post") as mock_post, \
          mock.patch("requests.put") as mock_put, \
@@ -411,7 +411,7 @@ def test_agent_parser_full_flow(pdf_file):
 
 def test_agent_parser_polling_retry(pdf_file):
     """Agent 轮询: 前两次 running，第三次 done"""
-    from src.server.parsing.mineru_agent_parser import MinerUAgentParser
+    from src.rag.parsing.mineru_agent_parser import MinerUAgentParser
 
     call_count = [0]
 
@@ -461,7 +461,7 @@ def test_agent_parser_polling_retry(pdf_file):
 
 def test_agent_parser_failure_fallback_to_pypdf(pdf_file):
     """Agent API 失败时应降级到 pypdf"""
-    from src.server.parsing.mineru_agent_parser import MinerUAgentParser
+    from src.rag.parsing.mineru_agent_parser import MinerUAgentParser
 
     with mock.patch("requests.post") as mock_post:
         mock_post.side_effect = Exception("Agent API 不可用")
@@ -474,7 +474,7 @@ def test_agent_parser_failure_fallback_to_pypdf(pdf_file):
 
 def test_agent_parser_failed_state(pdf_file):
     """Agent API 返回 state=failed 时应抛出并降级到 pypdf"""
-    from src.server.parsing.mineru_agent_parser import MinerUAgentParser
+    from src.rag.parsing.mineru_agent_parser import MinerUAgentParser
 
     with mock.patch("requests.post") as mock_post, \
          mock.patch("requests.put") as mock_put, \
@@ -510,7 +510,7 @@ def test_agent_parser_failed_state(pdf_file):
 
 def test_agent_parser_supported_mimes():
     """Agent Parser 支持的文件类型"""
-    from src.server.parsing.mineru_agent_parser import MinerUAgentParser
+    from src.rag.parsing.mineru_agent_parser import MinerUAgentParser
     parser = MinerUAgentParser()
     mimes = parser.supported_mime_types
     assert "application/pdf" in mimes

@@ -8,7 +8,7 @@ import pytest
 from httpx import AsyncClient
 from pypdf import PdfWriter
 
-from src.server.documents.service import MAX_FILE_SIZE, MAX_PDF_PAGES
+from src.rag.documents.service import MAX_FILE_SIZE, MAX_PDF_PAGES
 
 
 def make_pdf(page_count: int) -> bytes:
