@@ -55,23 +55,7 @@ from ...tools.single_agent_planning.self_evaluator import (
     evaluate_result, EvaluationOutput,
 )
 from ...utils.logger import get_logger
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# System Prompt
-# ═══════════════════════════════════════════════════════════════════════
-
-SUBAGENT_SYSTEM_PROMPT = """你是一个 **{subagent_type}** 子智能体: {description}
-
-## 你的能力
-{capabilities}
-
-## 执行规则
-1. 使用可用工具完成任务，优先调用与当前步骤匹配的工具
-2. 每次工具调用后，评估结果是否满足当前步骤的需求
-3. 如果工具返回错误，尝试其他方法或报告失败
-4. 所有步骤完成后提供清晰的最终结果
-5. 结果应该结构化、可被主智能体直接使用"""
+from ...prompt import SUBAGENT_SYSTEM_PROMPT, build_subagent_step_prompt
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -82,7 +66,6 @@ from .states import SubAgentState
 from .events import AgentRunCancelled
 
 
-MAX_REACT_ITERATIONS_PER_STEP = 4
 GRAPH_RECURSION_LIMIT = 50
 
 
@@ -99,7 +82,6 @@ class SubAgent(BaseAgent):
         description:     能力描述 (LLM 选择依据)
         capabilities:    能力标签列表
         api_tools:       本 subagent 专属的 L4 API tools 列表
-        api_tools_meta:  {tool_name: {category, tags, version}} 工具版本元数据
         model_kwargs:    传递给 get_model() 的额外参数
         store_type:      存储类型: "memory" | "sqlite"
         sqlite_path:     SQLite 路径 (store_type="sqlite" 时)
@@ -271,11 +253,14 @@ class SubAgent(BaseAgent):
                 step_desc = sub_plan[step_idx].get("description", "")
 
             step_instruction = ""
-            if step_desc:
-                step_instruction = (
-                    f"\n\n## 当前执行步骤 ({step_idx + 1}/{len(sub_plan)})\n"
-                    f"{step_desc}\n"
-                    f"请使用可用工具完成此步骤。"
+            # 每个计划步骤只在首次进入 agent 节点时注入一次执行指令。
+            # 工具调用后的消息历史已经包含 ToolMessage，不能再次提示模型
+            # “请使用工具”，否则模型容易在同一步骤重复调用相同工具。
+            if step_desc and state.get("react_iteration_count", 0) == 0:
+                step_instruction = build_subagent_step_prompt(
+                    step_desc,
+                    step_idx + 1,
+                    len(sub_plan),
                 )
 
             messages = list(state.get("messages", []))
@@ -384,12 +369,8 @@ class SubAgent(BaseAgent):
                 return END
             last_msg = messages[-1]
             if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-                if state.get("react_iteration_count", 0) > MAX_REACT_ITERATIONS_PER_STEP:
-                    self.logger.warning(
-                        "Step tool-call limit reached (%d); advancing",
-                        MAX_REACT_ITERATIONS_PER_STEP,
-                    )
-                    return "advance_step"
+                # 只要存在 tool_calls，就必须先由 ToolNode 为每个
+                # tool_call_id 生成对应 ToolMessage，不能直接跳过。
                 return "tools"
             return "advance_step"
 
@@ -429,7 +410,9 @@ class SubAgent(BaseAgent):
             should_continue,
             {"tools": "tools", "advance_step": "advance_step"},
         )
-        workflow.add_edge("tools", "agent")
+        # 子计划中的每个步骤都是原子操作。工具执行完成后直接保存工具
+        # 结果并推进下一步，避免 tools → agent 循环导致同一步骤重复调用。
+        workflow.add_edge("tools", "advance_step")
         workflow.add_conditional_edges(
             "advance_step",
             after_advance_step,
@@ -448,7 +431,7 @@ class SubAgent(BaseAgent):
             checkpointer=self._checkpointer,
             store=self._store,
         )
-        self.logger.info("Graph compiled: plan → agent↔tools → evaluate → (plan|report)")
+        self.logger.info("Graph compiled: plan → agent→tools?→advance → evaluate → (plan|report)")
 
     # ═══ 执行 (同步) ═══
 

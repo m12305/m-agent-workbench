@@ -21,6 +21,8 @@ from .events import MultiAgentEvent, EVENT_SCHEMAS
 from .sub_agent_registry import SubAgentRegistry, SubAgentMeta
 from .sub_agent import SubAgent
 from .main_agent import MainAgent
+from ...prompt import REMOTE_SENSING_CAPABILITIES, REMOTE_SENSING_DESCRIPTION
+from ...tools.backend_api import REMOTE_SENSING_TOOLS, REMOTE_SENSING_TOOLS_META
 
 
 def create_default_registry() -> SubAgentRegistry:
@@ -41,6 +43,21 @@ def create_default_registry() -> SubAgentRegistry:
             subagent_type="general_assistant",
             description="通用子智能体，获取当前日期和时间，返回 ISO 格式的时间字符串。",
             capabilities=["get_current_time"],
+        ),
+    ))
+
+    registry.register(SubAgentMeta(
+        subagent_type="remote_sensing",
+        display_name="遥感中心",
+        description=REMOTE_SENSING_DESCRIPTION,
+        capabilities=REMOTE_SENSING_CAPABILITIES,
+        factory=lambda: SubAgent(
+            name="RemoteSensingCenter",
+            subagent_type="remote_sensing",
+            description=REMOTE_SENSING_DESCRIPTION,
+            capabilities=REMOTE_SENSING_CAPABILITIES,
+            api_tools=REMOTE_SENSING_TOOLS,
+            #api_tools_meta=REMOTE_SENSING_TOOLS_META,
         ),
     ))
 

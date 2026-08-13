@@ -14,5 +14,10 @@ SubAgent 专属的与后端 API 交互的 LangChain tool。
 ===========================================================================
 """
 
-# 暂无预置 API tools — 由各 subagent 按需注册
-__all__: list[str] = []
+from .earth_control import REMOTE_SENSING_TOOLS, earth_move, REMOTE_SENSING_TOOLS_META
+
+__all__ = [
+    "REMOTE_SENSING_TOOLS",
+    "earth_move",
+    "REMOTE_SENSING_TOOLS_META",
+]

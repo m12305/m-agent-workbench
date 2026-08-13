@@ -69,44 +69,15 @@ from .states import MainAgentState
 from .events import MultiAgentEvent
 from .events import AgentRunCancelled
 from ...utils.logger import get_logger
+from ...prompt import (
+    MAIN_AGENT_SYSTEM_PROMPT,
+    build_delegation_task_prompt,
+    build_direct_response_prompt,
+    build_direct_step_prompt,
+)
 
 
 GRAPH_RECURSION_LIMIT = 50
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# System Prompt
-# ═══════════════════════════════════════════════════════════════════════
-
-MAIN_AGENT_SYSTEM_PROMPT = """你是一个 AI 主智能体和任务编排专家。你的职责是理解用户意图，判断任务所需能力，并选择最合适的执行方式，而不是默认由自己回答所有问题。
-
-## 核心职责
-
-1. 准确理解用户任务及其目标。
-2. 分别判断任务复杂度，以及是否需要调用子智能体。
-3. 当任务依赖实时信息、工具、外部数据或专业能力时，选择能力匹配的子智能体。
-4. 对复杂任务制定清晰、最小且可执行的计划。
-5. 综合子智能体返回的真实结果，生成完整、准确的最终回答。
-
-## 路由原则
-
-- `complexity` 与 `needs_subagents` 是两个独立维度。
-- `simple` 只表示任务步骤少，不代表不需要子智能体。
-- 只有不依赖实时信息、工具、外部数据或专业能力的普通对话和静态知识问答，才可以由主智能体直接回答。
-- 只要任务必须使用某个已注册子智能体的能力，即使任务只有一个步骤，也必须调用该子智能体。
-- 当前时间、当前日期、系统状态等实时信息不能依靠模型记忆推测；如果存在对应子智能体或工具能力，必须委派执行。
-- 例如：当 `general_assistant` 具备 `get_current_time` 能力时，“现在几点了”应判定为 `complexity=simple`、`needs_subagents=true`，并推荐 `general_assistant`。
-- 选择能够完成任务的最少子智能体，不要为了展示多智能体流程而进行无意义委派。
-- 不得虚构工具执行结果、实时数据或子智能体输出。
-
-## 执行与失败处理
-
-- 制定计划时只能使用当前已注册的子智能体类型，不得虚构不存在的类型。
-- 委派内容必须说明目标、必要上下文和预期输出。
-- 如果子智能体执行失败，应根据失败原因重试、替换执行者、调整计划或明确说明能力限制。
-- 最终回答必须基于实际执行结果；使用了子智能体时，应准确整合其发现，不得编造未返回的信息。
-
-始终遵守当前节点提示中规定的输出格式。执行任务分析时只返回要求的结构化结果，不要提前回答用户问题。"""
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -269,9 +240,7 @@ class MainAgent(BaseAgent):
             user_task = state.get("user_task", "")
             messages = [
                 SystemMessage(content=MAIN_AGENT_SYSTEM_PROMPT),
-                HumanMessage(content=(
-                    f"这是一个简单任务，不需要子智能体。请直接回答:\n\n{user_task}"
-                )),
+                HumanMessage(content=build_direct_response_prompt(user_task)),
             ]
             response = self.model.invoke(messages)
             return {
@@ -343,9 +312,9 @@ class MainAgent(BaseAgent):
             if subagent_type is None:
                 # 无需 subagent — main_agent 直接处理
                 task_desc = step["description"]
-                prompt = (
-                    f"请完成以下任务步骤:\n\n{task_desc}\n\n"
-                    f"原始用户任务: {state.get('user_task', '')}"
+                prompt = build_direct_step_prompt(
+                    task_desc,
+                    state.get("user_task", ""),
                 )
                 messages = [
                     SystemMessage(content=MAIN_AGENT_SYSTEM_PROMPT),
@@ -366,10 +335,10 @@ class MainAgent(BaseAgent):
                 try:
                     sub = self._get_or_create_subagent(subagent_type)
                     context = self._build_context_for_step(step, results)
-                    delegation_task = (
-                        f"{step['description']}\n\n"
-                        f"上下文: {context}\n\n"
-                        f"请完成此任务并返回结果。"
+                    delegation_task = build_delegation_task_prompt(
+                        step["description"],
+                        context,
+                        state.get("user_task", ""),
                     )
                     result = sub.run(
                         delegation_task,

@@ -9,29 +9,12 @@ MainAgent.synthesize 节点使用。
 """
 
 from pydantic import BaseModel, Field
+from ...prompt.planning import AGGREGATE_PROMPT
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # Prompt 模板
 # ═══════════════════════════════════════════════════════════════════════
-
-AGGREGATE_PROMPT = """你是一位 AI 综合报告专家。请将以下多个子智能体的执行结果综合为一份连贯的最终回答。
-
-## 原始用户任务
-{user_task}
-
-## 执行计划与结果
-{step_results}
-
-## 综合要求
-1. 按用户任务的自然逻辑组织回答
-2. 引用各子智能体的关键发现
-3. 如果某个步骤失败，如实说明并给出建议
-4. 回答风格: 清晰、专业、面向最终用户
-5. 标注信息来源 (来自哪个 subagent 类型的哪个步骤)
-
-请综合上述结果，生成最终回答。"""
-
 
 class AggregationOutput(BaseModel):
     """综合结果的结构化输出"""

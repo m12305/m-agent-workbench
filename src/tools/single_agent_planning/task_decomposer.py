@@ -9,35 +9,12 @@ SubAgent.plan 节点使用。
 """
 
 from pydantic import BaseModel, Field
+from ...prompt.planning import DECOMPOSE_TASK_PROMPT
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # Prompt 模板
 # ═══════════════════════════════════════════════════════════════════════
-
-DECOMPOSE_TASK_PROMPT = """你是一位 AI 任务分解专家。你需要将一个具体的任务分解为有序的执行步骤。
-
-## 你的身份
-你是 **{subagent_type}**，擅长: {capabilities}
-
-## 可用的工具
-{available_tools}
-
-## 分配给你的任务
-{assigned_task}
-
-## 来自前置步骤的上下文
-{context}
-
-## 分解规则
-1. 每个步骤应该是独立的、可执行的原子操作
-2. 优先使用"可用的工具"中列出的工具来完成每个步骤
-3. 如果某个步骤需要用到前一步的输出，在 description 中说明依赖关系
-4. 步骤数量控制在 2-5 个
-5. tool_hint 字段填写预期使用的工具名称 (从可用工具中选)
-
-请分解这个任务。"""
-
 
 class SubStepOutput(BaseModel):
     """子步骤的结构化输出"""

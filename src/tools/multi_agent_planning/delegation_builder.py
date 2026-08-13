@@ -9,30 +9,12 @@ MainAgent.execute 节点的 dispatch_to_subagent 使用。
 """
 
 from pydantic import BaseModel, Field
+from ...prompt.planning import DELEGATION_PROMPT
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # Prompt 模板
 # ═══════════════════════════════════════════════════════════════════════
-
-DELEGATION_PROMPT = """请根据以下信息，构建一份清晰的委托指令给子智能体。
-
-## 当前步骤
-步骤 ID: {step_id}
-任务描述: {description}
-目标子智能体: {subagent_type}
-
-## 前置步骤的上下文
-{context}
-
-## 原始用户任务
-{user_task}
-
-请构建一份委托指令，包含:
-1. 具体要完成的任务
-2. 前置步骤提供的相关数据/上下文
-3. 期望的输出格式"""
-
 
 class DelegationOutput(BaseModel):
     """委托指令的结构化输出"""
