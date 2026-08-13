@@ -5,6 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends
 
+from ..exceptions import AppError, NotFoundError
 from ..schemas import CreateSessionRequest, UpdateSessionRequest, SessionResponse, MessageView
 from ..deps import (
     get_identity,
@@ -15,7 +16,10 @@ from ..deps import (
 from ..repositories.base import Identity, Session
 from ..services.session_service import SessionService
 from ..services.chat_service import ChatService
-from ..services.multi_agent_service import MultiAgentService
+from ..services.multi_agent_service import (
+    MultiAgentService,
+    MultiAgentSessionBusyError,
+)
 
 router = APIRouter()
 
@@ -81,7 +85,6 @@ async def get_messages(
     # 验证会话属于当前用户
     session = await session_service.get_session(session_id)
     if session.user_id != identity.user_id:
-        from ..exceptions import NotFoundError
         raise NotFoundError("会话", session_id)
 
     if session.session_type == "chat":
@@ -134,6 +137,23 @@ async def delete_session(
     session_id: str,
     identity: Identity = Depends(get_identity),
     session_service: SessionService = Depends(get_session_service),
+    multi_agent_service: MultiAgentService = Depends(get_multi_agent_service),
 ):
-    """删除会话"""
+    """删除会话索引，并清理对应 Agent 的持久化状态。"""
+    session = await session_service.get_session(session_id)
+    if session.user_id != identity.user_id:
+        raise NotFoundError("会话", session_id)
+
+    if session.session_type == "multi_agent":
+        try:
+            multi_agent_service.delete_session_state(
+                identity.user_id, session_id,
+            )
+        except MultiAgentSessionBusyError as exc:
+            raise AppError(
+                code="SESSION_BUSY",
+                message=str(exc),
+                status_code=409,
+            ) from exc
+
     await session_service.delete_session(identity.user_id, session_id)

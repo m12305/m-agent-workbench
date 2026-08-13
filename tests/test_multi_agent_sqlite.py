@@ -12,7 +12,10 @@ import src.agents.multi_agent.main_agent as main_agent_module
 import src.agents.multi_agent.sub_agent as sub_agent_module
 from src.agents.multi_agent.main_agent import MainAgent
 from src.agents.multi_agent.sub_agent import SubAgent
-from src.server.services.multi_agent_service import MultiAgentService
+from src.server.services.multi_agent_service import (
+    MultiAgentService,
+    MultiAgentSessionBusyError,
+)
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
@@ -271,3 +274,28 @@ def test_service_cancel_run_sets_active_cancellation_event():
     assert service.cancel_run("user:session") is True
     assert cancellation_event.is_set()
     assert service.cancel_run("missing") is False
+
+
+def test_service_deletes_multi_agent_session_checkpoint():
+    service = MultiAgentService()
+    deleted_threads = []
+    fake_agent = SimpleNamespace(
+        _checkpointer=SimpleNamespace(
+            delete_thread=lambda thread_id: deleted_threads.append(thread_id)
+        )
+    )
+    service._agents["user-1"] = fake_agent
+    service._session_locks["user-1:session-1"] = object()
+
+    service.delete_session_state("user-1", "session-1")
+
+    assert deleted_threads == ["user-1:session-1"]
+    assert "user-1:session-1" not in service._session_locks
+
+
+def test_service_rejects_deleting_active_multi_agent_session():
+    service = MultiAgentService()
+    service._active_runs["user-1:session-1"] = threading.Event()
+
+    with pytest.raises(MultiAgentSessionBusyError, match="运行中的"):
+        service.delete_session_state("user-1", "session-1")

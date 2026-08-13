@@ -6,8 +6,9 @@
 
 ## 核心能力
 
-- **Agent 应用中心**：从统一入口访问不同 Agent，当前提供 Chat Agent。
+- **Agent 应用中心**：从统一入口访问不同 Agent，当前提供 Chat Agent 与多智能体（Plan-and-Solve 编排）。
 - **流式智能对话**：支持 SSE 流式回答、多轮会话和会话历史。
+- **多智能体编排**：MainAgent 负责任务分析、计划制定与调度，多个 SubAgent 分工执行并综合结果。
 - **RAG 知识库**：支持文档解析、向量索引，以及私有、共享、混合范围检索。
 - **成员与密钥管理**：使用数据库持久化用户和 API Key，并按管理员、成员角色控制权限。
 - **可扩展工作台**：前端通过 Agent 注册表展示应用，后端提供 Agent 基类、工具注册与服务层，便于继续接入新 Agent。
@@ -21,6 +22,8 @@
 
 <img title="" src="images/chat.png" alt="" width="735">
 
+<img title="" src="images/multi-agent.png" alt="" width="735">
+
 <img title="" src="images/knowledge.png" alt="" width="735">
 
 ---
@@ -31,21 +34,33 @@
 m-agent-workbench/
 ├── src/
 │   ├── agents/                    # Agent 层：BaseAgent / ChatAgent
+│   │   └── multi_agent/           # 多智能体：MainAgent 编排 + SubAgent + 注册中心
 │   ├── tools/                     # Agent 工具基类与注册表
+│   │   ├── backend_api/           # 后端 API 工具（遥感等）
+│   │   ├── general/               # 通用工具
+│   │   ├── single_agent_planning/ # 单智能体规划工具
+│   │   └── multi_agent_planning/  # 多智能体规划工具
 │   ├── models/                    # LLM 适配
 │   ├── config/                    # Agent 全局配置
+│   ├── prompt/                    # 提示词模板（对话 / 规划 / 多智能体 / 遥感）
+│   ├── callbacks/                 # 回调（Token 计数等）
+│   ├── utils/                     # 日志、重试等工具函数
+│   ├── rag/                       # RAG 知识库层（解析、分块、Embedding、Milvus、存储、任务、检索）
+│   │   ├── documents/             # 文档服务与异常
+│   │   ├── parsing/               # Text / Markdown / PDF / MinerU 解析
+│   │   ├── chunking/              # 文档分块策略
+│   │   ├── embedding/             # Embedding 服务适配
+│   │   ├── milvus/                # Milvus 向量数据库
+│   │   ├── storage/               # OSS / Local 文件存储
+│   │   ├── tasks/                 # 文档索引任务管线
+│   │   └── retrieval/             # 检索服务（基础 + 高级检索）
 │   └── server/                    # FastAPI 工作台后端
 │       ├── main.py                # 应用初始化与生命周期
-│       ├── api/                   # 认证、用户、会话与 Chat Agent API
-│       ├── documents/             # 知识库文档管理
+│       ├── api/                   # 认证、用户、会话、Chat 与 Multi-Agent API
 │       ├── repositories/          # SQLite / Memory 存储实现
-│       ├── services/              # 认证、会话、对话与检索编排
-│       ├── embedding/             # Embedding 服务适配
-│       ├── milvus/                # Milvus 向量数据库
-│       ├── tasks/                 # 文档索引任务管线
-│       ├── parsing/               # Text / Markdown / PDF / MinerU 解析
-│       ├── chunking/              # 文档分块策略
-│       └── storage/               # OSS / Local 文件存储
+│       ├── services/              # 认证、会话、对话与多智能体编排
+│       ├── middleware/            # 中间件
+│       └── exceptions.py          # 统一异常
 │
 ├── front/                         # Vue 3 前端
 │   ├── src/constants/agents.ts    # Agent 应用注册表
@@ -211,10 +226,11 @@ sudo docker compose up -d --build     # 更新后重新构建
 
 | 方法 | 端点 | 说明 |
 |------|------|------|
-| `GET` | `/api/v1/sessions` | 会话列表 |
+| `GET` | `/api/v1/sessions?session_type=chat\|multi_agent` | 按智能体类型列出会话 |
 | `POST` | `/api/v1/sessions` | 创建会话 |
 | `GET` | `/api/v1/sessions/{id}/messages` | 消息历史 |
-| `DELETE` | `/api/v1/sessions/{id}` | 删除会话 |
+| `PATCH` | `/api/v1/sessions/{id}` | 重命名会话 |
+| `DELETE` | `/api/v1/sessions/{id}` | 删除会话（含对应 Agent 持久化状态） |
 
 ### Chat Agent
 
@@ -224,6 +240,19 @@ sudo docker compose up -d --build     # 更新后重新构建
 | `POST` | `/api/v1/chat/stream` | SSE 流式问答 |
 
 请求体: `{ "query", "session_id", "knowledge_scope": "hybrid|private|shared" }`
+
+### Multi-Agent
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| `POST` | `/api/v1/multi-agent/chat/stream` | SSE 流式多智能体问答 |
+| `POST` | `/api/v1/multi-agent/chat/{session_id}/cancel` | 取消运行中的编排 |
+
+请求体: `{ "query", "session_id" }`（`session_id` 不传则自动创建新会话）。
+
+事件类型: `start` / `analyzing` / `analysis_done` / `plan_created` / `dispatching` /
+`subagent_start` / `subagent_plan` / `subagent_step` / `subagent_progress` / `subagent_done` /
+`synthesizing` / `synthesis_done` / `tool_call` / `token` / `error` / `done`
 
 ### 文档
 
@@ -255,9 +284,9 @@ sudo docker compose up -d --build     # 更新后重新构建
 
 ### Agent 扩展方式
 
-当前版本内置 Chat Agent，并将 Agent 实现与工作台通用能力分层：
+当前版本内置 Chat Agent 与多智能体（Plan-and-Solve 编排），并将 Agent 实现与工作台通用能力分层：
 
-1. 在 `src/agents/` 中基于 `BaseAgent` 实现 Agent 能力，并按需注册工具。
+1. 在 `src/agents/` 中基于 `BaseAgent` 实现 Agent 能力；多智能体场景通过 `SubAgentRegistry` 注册新的 SubAgent 类型并按需挂载工具。
 2. 在 FastAPI 服务层接入 Agent，复用认证、会话、知识检索和状态检查能力。
 3. 在 `front/src/constants/agents.ts` 注册应用信息与路由，使新 Agent 出现在应用中心。
 

@@ -32,6 +32,10 @@ from ...agents.multi_agent.events import AgentRunCancelled
 logger = logging.getLogger("server.multi_agent_service")
 
 
+class MultiAgentSessionBusyError(RuntimeError):
+    """Raised when a session is deleted while its graph is still running."""
+
+
 class MultiAgentService:
     """MainAgent 服务包装
 
@@ -166,6 +170,19 @@ class MultiAgentService:
         if final_answer:
             visible.append(AIMessage(content=str(final_answer)))
         return visible
+
+    def delete_session_state(self, user_id: str, session_id: str) -> None:
+        """Delete the MainAgent checkpoint associated with a session."""
+        tid = self._make_tid(user_id, session_id)
+        if tid in self._active_runs:
+            raise MultiAgentSessionBusyError("运行中的 Multi-Agent 会话不能删除")
+
+        agent = self._get_or_create_agent(user_id)
+        checkpointer = agent._checkpointer
+        if checkpointer is not None and hasattr(checkpointer, "delete_thread"):
+            checkpointer.delete_thread(tid)
+        self._session_locks.pop(tid, None)
+        logger.info("Multi-Agent 会话状态已删除: thread_id=%s", tid)
 
     # ── 注册 subagent ──
 

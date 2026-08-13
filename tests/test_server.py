@@ -278,6 +278,78 @@ async def test_delete_session(client: AsyncClient, user_headers):
 
 
 @pytest.mark.asyncio
+async def test_delete_multi_agent_session_cleans_checkpoint(
+    client: AsyncClient, user_headers, monkeypatch,
+):
+    from src.server.main import app
+
+    resp = await client.post(
+        "/api/v1/sessions",
+        json={"title": "待删除任务", "session_type": "multi_agent"},
+        headers=user_headers,
+    )
+    session_id = resp.json()["session_id"]
+    deleted = []
+    monkeypatch.setattr(
+        app.state.multi_agent_service,
+        "delete_session_state",
+        lambda user_id, requested_id: deleted.append((user_id, requested_id)),
+    )
+
+    resp = await client.delete(
+        f"/api/v1/sessions/{session_id}", headers=user_headers,
+    )
+
+    assert resp.status_code == 204
+    assert deleted and deleted[0][1] == session_id
+    list_resp = await client.get(
+        "/api/v1/sessions?session_type=multi_agent", headers=user_headers,
+    )
+    assert session_id not in {
+        item["session_id"] for item in list_resp.json()
+    }
+
+
+@pytest.mark.asyncio
+async def test_delete_running_multi_agent_session_keeps_history(
+    client: AsyncClient, user_headers, monkeypatch,
+):
+    from src.server.main import app
+    from src.server.services.multi_agent_service import (
+        MultiAgentSessionBusyError,
+    )
+
+    resp = await client.post(
+        "/api/v1/sessions",
+        json={"title": "运行中任务", "session_type": "multi_agent"},
+        headers=user_headers,
+    )
+    session_id = resp.json()["session_id"]
+
+    def reject_delete(_user_id, _session_id):
+        raise MultiAgentSessionBusyError("运行中的 Multi-Agent 会话不能删除")
+
+    monkeypatch.setattr(
+        app.state.multi_agent_service,
+        "delete_session_state",
+        reject_delete,
+    )
+
+    resp = await client.delete(
+        f"/api/v1/sessions/{session_id}", headers=user_headers,
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "SESSION_BUSY"
+    list_resp = await client.get(
+        "/api/v1/sessions?session_type=multi_agent", headers=user_headers,
+    )
+    assert session_id in {
+        item["session_id"] for item in list_resp.json()
+    }
+
+
+@pytest.mark.asyncio
 async def test_cannot_access_other_user_session(
     client: AsyncClient, user_headers, admin_headers,
 ):

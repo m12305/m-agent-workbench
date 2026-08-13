@@ -26,20 +26,40 @@
         <p v-else-if="sessionsError" class="ma-history-state is-error">{{ sessionsError }}</p>
         <p v-else-if="!multiAgentSessions.length" class="ma-history-state">暂无历史任务</p>
         <div v-else class="ma-history-list">
-          <button
+          <div
             v-for="session in multiAgentSessions"
             :key="session.session_id"
             class="ma-history-item"
             :class="{ 'is-active': activeSessionId === session.session_id }"
-            type="button"
-            :disabled="running || Boolean(loadingSessionId)"
-            @click="loadHistoricalSession(session)"
           >
-            <span>
-              <strong>{{ session.title || '未命名任务' }}</strong>
-              <small>{{ formatSessionTime(session.updated_at) }}</small>
-            </span>
-          </button>
+            <button
+              class="ma-history-main"
+              type="button"
+              :disabled="running || Boolean(loadingSessionId) || deleting"
+              @click="loadHistoricalSession(session)"
+            >
+              <span>
+                <strong>{{ session.title || '未命名任务' }}</strong>
+                <small>{{ formatSessionTime(session.updated_at) }}</small>
+              </span>
+            </button>
+            <button
+              class="ma-history-delete"
+              type="button"
+              :disabled="running || Boolean(loadingSessionId) || deleting"
+              :aria-label="`删除历史任务 ${session.title || '未命名任务'}`"
+              title="删除历史任务"
+              @click="sessionToDelete = session"
+            >
+              <CircleNotch
+                v-if="deleting && sessionToDelete?.session_id === session.session_id"
+                class="ma-spinning"
+                :size="14"
+                aria-hidden="true"
+              />
+              <Trash v-else :size="14" aria-hidden="true" />
+            </button>
+          </div>
         </div>
       </section>
 
@@ -267,6 +287,16 @@
         </form>
       </footer>
     </main>
+
+    <ConfirmDialog
+      :open="Boolean(sessionToDelete)"
+      title="删除这项历史任务？"
+      description="任务记录和对应的多智能体运行状态将被删除，此操作无法撤销。"
+      :detail="sessionToDelete?.title || '未命名任务'"
+      :busy="deleting"
+      @cancel="sessionToDelete = null"
+      @confirm="confirmDeleteSession"
+    />
   </div>
 </template>
 
@@ -291,6 +321,7 @@ import {
   PhStack as Stack,
   PhStop as Stop,
   PhStrategy as Strategy,
+  PhTrash as Trash,
   PhWarningCircle as WarningCircle,
   PhWrench as Wrench,
 } from '@phosphor-icons/vue'
@@ -298,6 +329,7 @@ import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { api, getSavedApiBase, STORAGE_KEYS } from '../api/client'
 import type { Session } from '../types/api'
+import ConfirmDialog from '../components/feedback/ConfirmDialog.vue'
 
 marked.setOptions({ breaks: true, gfm: true })
 
@@ -357,6 +389,8 @@ const multiAgentSessions = ref<Session[]>([])
 const sessionsLoading = ref(false)
 const sessionsError = ref('')
 const loadingSessionId = ref('')
+const sessionToDelete = ref<Session | null>(null)
+const deleting = ref(false)
 let eventSequence = 0
 let copyTimer: number | undefined
 
@@ -683,6 +717,26 @@ async function loadHistoricalSession(session: Session) {
   }
 }
 
+async function confirmDeleteSession() {
+  const session = sessionToDelete.value
+  if (!session || deleting.value || running.value) return
+
+  deleting.value = true
+  sessionsError.value = ''
+  try {
+    await api.deleteSession(session.session_id)
+    multiAgentSessions.value = multiAgentSessions.value.filter(
+      (item) => item.session_id !== session.session_id,
+    )
+    if (activeSessionId.value === session.session_id) resetRun()
+    sessionToDelete.value = null
+  } catch (error) {
+    sessionsError.value = error instanceof Error ? error.message : '历史任务删除失败'
+  } finally {
+    deleting.value = false
+  }
+}
+
 async function copyAnswer() {
   if (!answerText.value) return
   await navigator.clipboard.writeText(answerText.value)
@@ -868,12 +922,17 @@ onBeforeUnmount(() => {
 .ma-history > header button { width: 27px; height: 27px; display: grid; place-items: center; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; }
 .ma-history > header button:hover { background: var(--surface-hover); color: var(--text); }
 .ma-history-list { max-height: 176px; overflow-y: auto; display: grid; gap: 4px; }
-.ma-history-item { min-width: 0; min-height: 48px; padding: 7px 8px 7px 10px; display: flex; align-items: center; gap: 8px; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); text-align: left; cursor: pointer; }
+.ma-history-item { min-width: 0; min-height: 48px; padding: 0 5px 0 0; display: flex; align-items: center; gap: 3px; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); }
 .ma-history-item:hover, .ma-history-item.is-active { border-color: var(--line); background: var(--surface-hover); color: var(--text); }
-.ma-history-item:disabled { cursor: default; opacity: 0.66; }
-.ma-history-item > span { min-width: 0; flex: 1; display: grid; gap: 3px; }
-.ma-history-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-soft); font-size: 0.66rem; }
-.ma-history-item small { font-size: 0.58rem; }
+.ma-history-main { min-width: 0; min-height: 46px; padding: 7px 5px 7px 10px; flex: 1; display: flex; align-items: center; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.ma-history-main:disabled, .ma-history-delete:disabled { cursor: default; opacity: 0.55; }
+.ma-history-main > span { min-width: 0; display: grid; gap: 3px; }
+.ma-history-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-soft); font-size: 0.66rem; }
+.ma-history-main small { font-size: 0.58rem; }
+.ma-history-delete { width: 29px; height: 29px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; opacity: 0; transition: color 150ms ease, background-color 150ms ease, opacity 150ms ease; }
+.ma-history-item:hover .ma-history-delete, .ma-history-item:focus-within .ma-history-delete, .ma-history-item.is-active .ma-history-delete { opacity: 1; }
+.ma-history-delete:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+.ma-history-delete:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
 .ma-history-state { padding: 8px 2px; color: var(--text-muted); font-size: 0.63rem; }
 .ma-history-state.is-error { color: var(--danger); }
 
