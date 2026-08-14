@@ -59,7 +59,8 @@
       "args": ["-m", "knowledge_mcp_server"],  // stdio 专用：启动参数
       "env": {"KNOWLEDGE_API_KEY": "..."},     // stdio 专用：子进程环境变量
       "timeout_seconds": 30,        // 单次工具调用超时
-      "allowed_tools": ["*"]        // 白名单："*" 全放行，或列出工具名
+      "allowed_tools": ["*"],       // 白名单："*" 全放行，或列出工具名
+      "subagents": ["general_assistant"]  // 分配给哪些子 agent；"*"=全部
     },
     {
       "name": "web",
@@ -75,7 +76,8 @@
 
 对应 Pydantic 模型在 [src/tools/mcp/config.py](src/tools/mcp/config.py)：
 
-- `McpServerConfig`：单个 Server（`name` / `transport` / `command` / `args` / `env` / `url` / `headers` / `timeout_seconds` / `allowed_tools`）。
+- `McpServerConfig`：单个 Server（`name` / `transport` / `command` / `args` / `env` / `url` / `headers` / `timeout_seconds` / `allowed_tools` / `subagents`）。
+- `subagents`：server 级工具分配，声明这个 server 的工具归哪些子 agent 使用（默认 `["*"]` 全部；写 `["general_assistant"]` 则只有该子 agent 能加载）。
 - `McpConfig`：`enabled` + `servers[]`。
 - `load_mcp_config(path)`：读 JSON 文件，**文件缺失或解析失败时返回 `McpConfig(enabled=False)`**（静默降级，不抛异常）。
 

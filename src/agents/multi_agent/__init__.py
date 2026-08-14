@@ -30,6 +30,24 @@ from ...prompt import (
 from ...tools.backend_api import REMOTE_SENSING_TOOLS, REMOTE_SENSING_TOOLS_META
 from ...tools.backend_api.tavily_tools import TAVILY_TOOLS, TAVILY_TOOLS_META
 
+def _filter_mcp(
+    tools: list | None,
+    metas: dict[str, dict] | None,
+    subagent_type: str,
+) -> tuple[list, dict[str, dict]]:
+    """按 subagents 字段过滤 MCP 工具，只保留属于该 subagent 类型的。"""
+    tools = tools or []
+    metas = metas or {}
+    out_tools: list = []
+    out_metas: dict[str, dict] = {}
+    for t in tools:
+        allowed = metas.get(t.name, {}).get("subagents", ["*"])
+        if "*" in allowed or subagent_type in allowed:
+            out_tools.append(t)
+            out_metas[t.name] = metas[t.name]
+    return out_tools, out_metas
+
+
 def create_default_registry(
     mcp_tools: list | None = None,
     mcp_tools_meta: dict[str, dict] | None = None,
@@ -37,9 +55,12 @@ def create_default_registry(
     """创建预置了通用 subagent 类型的注册中心
 
     用户可以调用 registry.register() 添加更多 subagent 类型。
-    mcp_tools/mcp_tools_meta 会注入到所有预置 SubAgent。
+    mcp_tools/mcp_tools_meta 按 server 的 subagents 字段分配到各预置 SubAgent。
     """
     registry = SubAgentRegistry()
+
+    ga_tools, ga_metas = _filter_mcp(mcp_tools, mcp_tools_meta, "general_assistant")
+    rs_tools, rs_metas = _filter_mcp(mcp_tools, mcp_tools_meta, "remote_sensing")
 
     # 注册一个通用子智能体 (示例)
     registry.register(SubAgentMeta(
@@ -54,8 +75,8 @@ def create_default_registry(
             capabilities=GENERAL_ASSISTANT_CAPABILITIES,
             api_tools=TAVILY_TOOLS,
             api_tools_meta=TAVILY_TOOLS_META,
-            mcp_tools=mcp_tools,
-            mcp_tools_meta=mcp_tools_meta,
+            mcp_tools=ga_tools,
+            mcp_tools_meta=ga_metas,
         ),
     ))
 
@@ -71,8 +92,8 @@ def create_default_registry(
             capabilities=REMOTE_SENSING_CAPABILITIES,
             api_tools=REMOTE_SENSING_TOOLS,
             api_tools_meta=REMOTE_SENSING_TOOLS_META,
-            mcp_tools=mcp_tools,
-            mcp_tools_meta=mcp_tools_meta,
+            mcp_tools=rs_tools,
+            mcp_tools_meta=rs_metas,
         ),
     ))
 

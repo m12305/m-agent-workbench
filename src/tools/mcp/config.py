@@ -16,6 +16,7 @@ class McpServerConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: float = 30.0
     allowed_tools: list[str] = Field(default_factory=lambda: ["*"])
+    subagents: list[str] = Field(default_factory=lambda: ["*"])
 
 
 class McpConfig(BaseModel):

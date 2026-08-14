@@ -99,7 +99,8 @@ class McpAdapter:
                     tools.append(tool)
                     metas[tool.name] = {"category": "mcp",
                                         "tags": ["mcp", server_cfg.name],
-                                        "version": "1.0.0"}
+                                        "version": "1.0.0",
+                                        "subagents": server_cfg.subagents}
             except Exception as e:
                 logger.warning("MCP '%s' 工具发现失败: %s", server_cfg.name, e)
         return tools, metas
