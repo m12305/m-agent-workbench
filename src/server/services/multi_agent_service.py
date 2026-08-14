@@ -1,6 +1,6 @@
 """
 ===========================================================================
-MultiAgentService — MainAgent 的 FastAPI 服务包装
+MultiAgentService — MainAgent 的 FastAPI 服务包装（异步）
 ===========================================================================
 
 与 ChatService 相同的模式:
@@ -11,7 +11,6 @@ MultiAgentService — MainAgent 的 FastAPI 服务包装
 使用:
     from ..agents.multi_agent import SubAgentRegistry
     registry = SubAgentRegistry()
-    # ... 注册 subagent 类型 ...
     service = MultiAgentService(sub_agent_registry=registry)
 ===========================================================================
 """
@@ -19,7 +18,6 @@ MultiAgentService — MainAgent 的 FastAPI 服务包装
 import asyncio
 import hashlib
 import logging
-import threading
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -53,11 +51,11 @@ class MultiAgentService:
         self._store_type = store_type
         self._sqlite_path = sqlite_path
         self._session_locks: dict[str, asyncio.Lock] = {}
-        self._active_runs: dict[str, threading.Event] = {}
+        self._active_runs: dict[str, asyncio.Event] = {}
 
     # ── Agent 管理 ──
 
-    def _get_or_create_agent(self, user_id: str) -> MainAgent:
+    async def _get_or_create_agent(self, user_id: str) -> MainAgent:
         """按需获取或创建用户的 MainAgent 实例"""
         if user_id not in self._agents:
             agent = MainAgent(
@@ -66,34 +64,21 @@ class MultiAgentService:
                 store_type=self._store_type,
                 sqlite_path=self._sqlite_path_for_user(user_id),
             )
-            agent.initialize()
+            await agent.ainitialize()
             self._agents[user_id] = agent
             logger.info("新 MainAgent 实例: user=%s", user_id[:8])
         return self._agents[user_id]
 
-    def close_user(self, user_id: str):
+    async def close_user(self, user_id: str):
         """释放用户的 MainAgent 实例"""
         prefix = f"{user_id}:"
         for thread_id in [key for key in self._active_runs if key.startswith(prefix)]:
             self.cancel_run(thread_id)
         agent = self._agents.pop(user_id, None)
         if agent:
-            agent.close()
+            await agent.aclose()
         for thread_id in [key for key in self._session_locks if key.startswith(prefix)]:
             self._session_locks.pop(thread_id, None)
-
-    # ── 同步执行 ──
-
-    def chat(
-        self,
-        user_id: str,
-        session_id: str,
-        query: str,
-    ) -> str:
-        """同步问答 — 返回完整回答文本"""
-        agent = self._get_or_create_agent(user_id)
-        tid = self._make_tid(user_id, session_id)
-        return agent.run(query, thread_id=tid)
 
     # ── 流式执行 ──
 
@@ -108,13 +93,13 @@ class MultiAgentService:
         Yields:
             dict: {event: str, data: dict}
         """
-        agent = self._get_or_create_agent(user_id)
+        agent = await self._get_or_create_agent(user_id)
         tid = self._make_tid(user_id, session_id)
 
         # 同一会话只允许一个图执行，避免重复提交造成 checkpoint 写竞争。
         session_lock = self._session_locks.setdefault(tid, asyncio.Lock())
         async with session_lock:
-            cancellation_event = threading.Event()
+            cancellation_event = asyncio.Event()
             self._active_runs[tid] = cancellation_event
             try:
                 async for event in agent.arun_stream(
@@ -151,14 +136,14 @@ class MultiAgentService:
         cancellation_event.set()
         return True
 
-    def get_session_messages(self, user_id: str, session_id: str) -> list:
+    async def get_session_messages(self, user_id: str, session_id: str) -> list:
         """Return the task/final-answer pair without orchestration internals."""
-        agent = self._get_or_create_agent(user_id)
+        agent = await self._get_or_create_agent(user_id)
         if agent._graph is None:
             return []
 
         tid = self._make_tid(user_id, session_id)
-        state = agent._graph.get_state({"configurable": {"thread_id": tid}})
+        state = await agent._graph.aget_state({"configurable": {"thread_id": tid}})
         if not state or not state.values:
             return []
 
@@ -171,16 +156,19 @@ class MultiAgentService:
             visible.append(AIMessage(content=str(final_answer)))
         return visible
 
-    def delete_session_state(self, user_id: str, session_id: str) -> None:
+    async def delete_session_state(self, user_id: str, session_id: str) -> None:
         """Delete the MainAgent checkpoint associated with a session."""
         tid = self._make_tid(user_id, session_id)
         if tid in self._active_runs:
             raise MultiAgentSessionBusyError("运行中的 Multi-Agent 会话不能删除")
 
-        agent = self._get_or_create_agent(user_id)
+        agent = await self._get_or_create_agent(user_id)
         checkpointer = agent._checkpointer
-        if checkpointer is not None and hasattr(checkpointer, "delete_thread"):
-            checkpointer.delete_thread(tid)
+        if checkpointer is not None:
+            if hasattr(checkpointer, "adelete_thread"):
+                await checkpointer.adelete_thread(tid)
+            elif hasattr(checkpointer, "delete_thread"):
+                checkpointer.delete_thread(tid)
         self._session_locks.pop(tid, None)
         logger.info("Multi-Agent 会话状态已删除: thread_id=%s", tid)
 
@@ -211,10 +199,10 @@ class MultiAgentService:
         user_key = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:16]
         return str(base_path.with_name(f"{base_path.stem}-{user_key}{suffix}"))
 
-    def close_all(self):
+    async def close_all(self):
         """关闭所有用户实例"""
         for user_id in list(self._agents.keys()):
-            self.close_user(user_id)
+            await self.close_user(user_id)
         self._session_locks.clear()
         for cancellation_event in self._active_runs.values():
             cancellation_event.set()

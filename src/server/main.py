@@ -20,6 +20,7 @@ from .middleware import LoggingMiddleware, AuthMiddleware, setup_cors
 from .services import AuthService, SessionService, ChatService
 from ..rag.retrieval import RetrievalService
 from .services.multi_agent_service import MultiAgentService
+from ..tools.mcp import load_mcp_config, McpAdapter
 from .repositories import (
     InMemoryUserRepo, InMemoryApiKeyRepo, InMemorySessionRepo,
     InMemoryDocumentRepo, InMemoryChunkRepo, InMemoryTaskRepo,
@@ -172,10 +173,18 @@ async def lifespan(app: FastAPI):
     # ── Chat (注入检索) ──
     chat_service = ChatService(retrieval_service=retrieval)
 
+    # ── MCP 工具 (默认关闭，连接失败不阻断) ──
+    mcp_cfg = load_mcp_config(os.getenv("MCP_CONFIG_PATH", "./mcp.json"))
+    mcp_adapter = McpAdapter(mcp_cfg)
+    mcp_tools, mcp_tools_meta = await mcp_adapter.discover()
+    logger.info("MCP 工具: enabled=%s, tools=%d", mcp_cfg.enabled, len(mcp_tools))
+
     # ── Multi-Agent (Plan-and-Solve 多智能体编排) ──
     from ..agents.multi_agent import create_default_registry
 
-    sub_agent_registry = create_default_registry()
+    sub_agent_registry = create_default_registry(
+        mcp_tools=mcp_tools, mcp_tools_meta=mcp_tools_meta,
+    )
     storage_sqlite_dir = os.getenv("STORAGE_SQLITE_DIR", os.path.join(os.getcwd(), "data"))
     multi_agent_service = MultiAgentService(
         sub_agent_registry=sub_agent_registry,
@@ -275,6 +284,7 @@ async def lifespan(app: FastAPI):
     app.state.embedding = embedding
     app.state.milvus = milvus
     app.state.multi_agent_service = multi_agent_service
+    app.state.mcp_tools = mcp_tools
     app.state.sqlite_db = sqlite_db
 
     logger.info("🚀 FastAPI 服务已启动 (auth=persistent, "
@@ -295,7 +305,9 @@ async def lifespan(app: FastAPI):
         if milvus:
             milvus.disconnect()
         if multi_agent_service:
-            multi_agent_service.close_all()
+            await multi_agent_service.close_all()
+        if mcp_adapter:
+            await mcp_adapter.close()
         if sqlite_db:
             await sqlite_db.close()
         logger.info("🛑 FastAPI 服务已关闭")

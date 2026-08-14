@@ -79,3 +79,16 @@ def build_subagent_step_prompt(
         f"{step_description}\n"
         "请使用可用工具完成此步骤。"
     )
+
+
+def build_structured_output_retry_prompt(
+    schema_name: str,
+    validation_error: str,
+) -> str:
+    """构建结构化输出失败后的单次纠错提示。"""
+    return (
+        f"上一次 `{schema_name}` 结构化输出无效。\n"
+        f"校验错误：{validation_error}\n\n"
+        "请重新生成结构化结果，必须填写 Schema 中的全部必填字段，"
+        "不得返回空对象、解释文字或 Markdown。"
+    )

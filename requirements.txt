@@ -45,11 +45,16 @@ aiosqlite>=0.20.0
 # 3.0.1 修复 SQLite checkpointer 元数据过滤的 SQL 注入问题
 langgraph-checkpoint-sqlite>=3.0.1
 
+# MCP 工具接入 (外部 MCP Server 客户端)
+mcp>=2.0
+
 # 阿里云 OSS (可选)
 alibabacloud-oss-v2
 
 # Milvus 向量数据库
 pymilvus>=2.4.0
+
+tavily-python==0.7.25
 
 # 可选: PostgreSQL 持久化存储 (用于 production)
 # ============================================================================

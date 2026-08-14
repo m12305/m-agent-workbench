@@ -186,7 +186,7 @@ async def test_messages_route_to_multi_agent_service(
     )
     session_id = session.json()["session_id"]
 
-    def multi_agent_messages(user_id: str, requested_session_id: str):
+    async def multi_agent_messages(user_id: str, requested_session_id: str):
         assert user_id
         assert requested_session_id == session_id
         return [
@@ -290,10 +290,13 @@ async def test_delete_multi_agent_session_cleans_checkpoint(
     )
     session_id = resp.json()["session_id"]
     deleted = []
+
+    async def _record_delete(user_id, requested_id):
+        deleted.append((user_id, requested_id))
     monkeypatch.setattr(
         app.state.multi_agent_service,
         "delete_session_state",
-        lambda user_id, requested_id: deleted.append((user_id, requested_id)),
+        _record_delete,
     )
 
     resp = await client.delete(
@@ -326,7 +329,7 @@ async def test_delete_running_multi_agent_session_keeps_history(
     )
     session_id = resp.json()["session_id"]
 
-    def reject_delete(_user_id, _session_id):
+    async def reject_delete(_user_id, _session_id):
         raise MultiAgentSessionBusyError("运行中的 Multi-Agent 会话不能删除")
 
     monkeypatch.setattr(
@@ -368,6 +371,46 @@ async def test_cannot_access_other_user_session(
         headers=admin_headers,
     )
     assert resp.status_code == 404
+
+
+# ═══════════════════════════════════════════════════════════════
+# MCP 工具接线
+# ═══════════════════════════════════════════════════════════════
+
+class _FakeMcpAdapter:
+    def __init__(self, config):
+        self.config = config
+
+    async def discover(self):
+        if not self.config.enabled:
+            return [], {}
+        from langchain_core.tools import tool
+
+        @tool
+        async def k_search(q: str) -> str:
+            """fake mcp tool"""
+            return "x"
+        k_search.name = "k_search"
+        return [k_search], {"k_search": {"category": "mcp", "tags": ["mcp", "k"], "version": "1.0.0"}}
+
+    async def close(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_lifespan_wires_mcp_tools_when_configured(monkeypatch, tmp_path):
+    monkeypatch.setenv("REPOSITORY_BACKEND", "memory")
+    monkeypatch.setenv("MCP_CONFIG_PATH", str(tmp_path / "mcp.json"))
+    (tmp_path / "mcp.json").write_text(
+        '{"enabled": true, "servers": [{"name": "k", "transport": "stdio", "command": "python"}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("src.server.main.McpAdapter", _FakeMcpAdapter)
+
+    from src.server.main import app
+    async with app.router.lifespan_context(app):
+        assert len(app.state.mcp_tools) == 1
+        assert app.state.multi_agent_service is not None
 
 
 # ═══════════════════════════════════════════════════════════════

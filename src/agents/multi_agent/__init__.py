@@ -21,14 +21,23 @@ from .events import MultiAgentEvent, EVENT_SCHEMAS
 from .sub_agent_registry import SubAgentRegistry, SubAgentMeta
 from .sub_agent import SubAgent
 from .main_agent import MainAgent
-from ...prompt import REMOTE_SENSING_CAPABILITIES, REMOTE_SENSING_DESCRIPTION
+from ...prompt import (
+    GENERAL_ASSISTANT_CAPABILITIES,
+    GENERAL_ASSISTANT_DESCRIPTION,
+    REMOTE_SENSING_CAPABILITIES,
+    REMOTE_SENSING_DESCRIPTION,
+)
 from ...tools.backend_api import REMOTE_SENSING_TOOLS, REMOTE_SENSING_TOOLS_META
+from ...tools.backend_api.tavily_tools import TAVILY_TOOLS, TAVILY_TOOLS_META
 
-
-def create_default_registry() -> SubAgentRegistry:
+def create_default_registry(
+    mcp_tools: list | None = None,
+    mcp_tools_meta: dict[str, dict] | None = None,
+) -> SubAgentRegistry:
     """创建预置了通用 subagent 类型的注册中心
 
     用户可以调用 registry.register() 添加更多 subagent 类型。
+    mcp_tools/mcp_tools_meta 会注入到所有预置 SubAgent。
     """
     registry = SubAgentRegistry()
 
@@ -36,13 +45,17 @@ def create_default_registry() -> SubAgentRegistry:
     registry.register(SubAgentMeta(
         subagent_type="general_assistant",
         display_name="通用子智能体",
-        description="获取当前日期和时间，返回 ISO 格式的时间字符串。",
-        capabilities=["get_current_time"],
+        description=GENERAL_ASSISTANT_DESCRIPTION,
+        capabilities=GENERAL_ASSISTANT_CAPABILITIES,
         factory=lambda: SubAgent(
             name="GeneralAssistant",
             subagent_type="general_assistant",
-            description="通用子智能体，获取当前日期和时间，返回 ISO 格式的时间字符串。",
-            capabilities=["get_current_time"],
+            description=GENERAL_ASSISTANT_DESCRIPTION,
+            capabilities=GENERAL_ASSISTANT_CAPABILITIES,
+            api_tools=TAVILY_TOOLS,
+            api_tools_meta=TAVILY_TOOLS_META,
+            mcp_tools=mcp_tools,
+            mcp_tools_meta=mcp_tools_meta,
         ),
     ))
 
@@ -57,7 +70,9 @@ def create_default_registry() -> SubAgentRegistry:
             description=REMOTE_SENSING_DESCRIPTION,
             capabilities=REMOTE_SENSING_CAPABILITIES,
             api_tools=REMOTE_SENSING_TOOLS,
-            #api_tools_meta=REMOTE_SENSING_TOOLS_META,
+            api_tools_meta=REMOTE_SENSING_TOOLS_META,
+            mcp_tools=mcp_tools,
+            mcp_tools_meta=mcp_tools_meta,
         ),
     ))
 

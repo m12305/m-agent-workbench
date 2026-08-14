@@ -1,0 +1,22 @@
+{
+  "enabled": false,
+  "servers": [
+    {
+      "name": "knowledge",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "knowledge_mcp_server"],
+      "env": {"KNOWLEDGE_API_KEY": "your-key-here"},
+      "timeout_seconds": 30,
+      "allowed_tools": ["*"]
+    },
+    {
+      "name": "web",
+      "transport": "streamable-http",
+      "url": "http://localhost:3000/mcp",
+      "headers": {"Authorization": "Bearer your-token-here"},
+      "timeout_seconds": 30,
+      "allowed_tools": ["fetch"]
+    }
+  ]
+}

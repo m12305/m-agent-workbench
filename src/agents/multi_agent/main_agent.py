@@ -1,6 +1,6 @@
 """
 ===========================================================================
-MainAgent — 层级多智能体编排器
+MainAgent — 层级多智能体编排器（异步）
 ===========================================================================
 
 基于 LangGraph 的编排器, 负责:
@@ -12,33 +12,24 @@ MainAgent — 层级多智能体编排器
 
 与 SubAgent 的关系:
   MainAgent 通过 SubAgentRegistry 发现可用 subagent,
-  按需实例化, 通过 subagent.run() 委托任务。
+  按需实例化, 通过 await subagent.arun() 委托任务。
 
 流式输出:
   每个节点过渡时 yield SSE event, 支持分级展示进度。
 
 使用:
     registry = SubAgentRegistry()
-    # ... 注册 subagent 类型 ...
-
     main = MainAgent(sub_agent_registry=registry)
-    main.initialize()
-
-    # 同步
-    answer = main.run("帮我分析销售数据并生成报告")
-
-    # 流式
-    for event in main.run_stream("帮我分析销售数据并生成报告"):
-        print(event)
+    await main.ainitialize()
+    answer = await main.arun("帮我分析销售数据并生成报告")
 ===========================================================================
 """
 
 import asyncio
 import sqlite3
-import threading
 import uuid
 from pathlib import Path
-from typing import AsyncGenerator, Generator
+from typing import AsyncGenerator
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -57,9 +48,6 @@ from ...tools.multi_agent_planning.task_analyzer import (
 from ...tools.multi_agent_planning.subagent_matcher import (
     match_subagents, build_selection_context, SubagentMatchOutput,
 )
-from ...tools.multi_agent_planning.delegation_builder import (
-    build_delegation,
-)
 from ...tools.multi_agent_planning.result_aggregator import (
     aggregate_results, AggregationOutput,
 )
@@ -74,6 +62,7 @@ from ...prompt import (
     build_delegation_task_prompt,
     build_direct_response_prompt,
     build_direct_step_prompt,
+    build_structured_output_retry_prompt,
 )
 
 
@@ -95,6 +84,8 @@ class MainAgent(BaseAgent):
         sqlite_path:            SQLite 路径
         max_step_retries:       单个执行步骤的最大重试次数 (默认 2)
         max_replans:            max_step_retries 的兼容别名
+        max_structured_retries: 结构化输出解析失败后的额外重试次数 (默认 1)
+        mcp_tools:              外部 MCP 工具列表 (透传给 SubAgent)
     """
 
     def __init__(
@@ -106,6 +97,9 @@ class MainAgent(BaseAgent):
         sqlite_path: str | None = None,
         max_step_retries: int = 2,
         max_replans: int | None = None,
+        max_structured_retries: int = 1,
+        mcp_tools: list | None = None,
+        mcp_tools_meta: dict[str, dict] | None = None,
         **kwargs,
     ):
         super().__init__(name=name, **kwargs)
@@ -113,10 +107,13 @@ class MainAgent(BaseAgent):
         self._model_kwargs = model_kwargs or {}
         self._store_type = store_type
         self._sqlite_path = sqlite_path
+        self._mcp_tools = mcp_tools or []
+        self._mcp_tools_meta = mcp_tools_meta or {}
         # Backwards-compatible alias: failures now retry the same execute step.
         self._max_step_retries = (
             max_replans if max_replans is not None else max_step_retries
         )
+        self._max_structured_retries = max(0, max_structured_retries)
 
         # 在 _setup 中设置
         self.tool_registry: ToolRegistry | None = None
@@ -124,13 +121,14 @@ class MainAgent(BaseAgent):
         self._checkpointer = None
         self._store = None
         self._sqlite_connections: tuple[sqlite3.Connection, ...] = ()
+        self._async_connections: tuple = ()
         self._sub_agents_cache: dict[str, SubAgent] = {}
-        self._cancellation_events: dict[str, threading.Event] = {}
+        self._cancellation_events: dict[str, asyncio.Event] = {}
 
     # ═══ 初始化 ═══
 
     def _setup(self, **kwargs):
-        """初始化 MainAgent 组件"""
+        """初始化 MainAgent 组件 (模型 + 工具注册中心 + 图构建)"""
         logger = get_logger(f"MainAgent.{self.name}")
 
         # 1. 模型
@@ -141,72 +139,69 @@ class MainAgent(BaseAgent):
         # 2. 工具注册中心 (仅 L1 通用 tools)
         self.tool_registry = ToolRegistry()
         self.tool_registry.register_with_meta(BUILTIN_TOOLS, BUILTIN_TOOLS_META)
-        #self.tool_registry.register_many(GENERAL_TOOLS, category="general")
 
-        # 3. 存储
-        if self._store_type == "sqlite":
-            try:
-                from langgraph.checkpoint.sqlite import SqliteSaver
-                from langgraph.store.sqlite import SqliteStore
-            except ImportError:
-                logger.warning("langgraph-checkpoint-sqlite 未安装，回退到内存存储")
-                self._checkpointer = MemorySaver()
-                self._store = InMemoryStore()
-            else:
-                db_path = Path(self._sqlite_path or "./data/main_agent.db").expanduser()
-                db_path.parent.mkdir(parents=True, exist_ok=True)
-
-                checkpointer_conn = sqlite3.connect(
-                    str(db_path),
-                    check_same_thread=False,
-                    timeout=30.0,
-                )
-                store_conn = None
-                try:
-                    # SqliteStore 官方连接工厂使用 autocommit。缺少该参数时，
-                    # setup() 的最后一条迁移记录会留下写事务并锁住 SqliteSaver。
-                    store_conn = sqlite3.connect(
-                        str(db_path),
-                        check_same_thread=False,
-                        isolation_level=None,
-                        timeout=30.0,
-                    )
-                    checkpointer_conn.execute("PRAGMA busy_timeout = 30000")
-                    store_conn.execute("PRAGMA busy_timeout = 30000")
-
-                    self._checkpointer = SqliteSaver(checkpointer_conn)
-                    self._checkpointer.setup()
-                    self._store = SqliteStore(store_conn)
-                    self._store.setup()
-                except Exception:
-                    checkpointer_conn.close()
-                    if store_conn is not None:
-                        store_conn.close()
-                    raise
-
-                self._sqlite_connections = (checkpointer_conn, store_conn)
-                self._sqlite_path = str(db_path)
-                logger.info("SQLite 存储: %s", db_path)
-        else:
-            self._checkpointer = MemorySaver()
-            self._store = InMemoryStore()
-
-        # 4. 构建图
+        # 3. 构建图
         if CAN_RUN and self.model is not None:
             self._build_graph()
         else:
             logger.warning("跳过图构建 (无可用模型)")
 
+    async def ainitialize(self):
+        """异步初始化：SQLite 走异步 store，memory 走同步 MemorySaver。"""
+        if self._initialized:
+            return
+        if self._store_type == "sqlite":
+            await self._setup_async_store()
+        else:
+            self._checkpointer = MemorySaver()
+            self._store = InMemoryStore()
+        self._setup()
+        self._initialized = True
+
+    async def _setup_async_store(self):
+        """SQLite 异步 checkpointer/store（aiosqlite + AsyncSqliteSaver/Store）。"""
+        try:
+            import aiosqlite
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            from langgraph.store.sqlite.aio import AsyncSqliteStore
+        except ImportError:
+            self._checkpointer = MemorySaver()
+            self._store = InMemoryStore()
+            return
+
+        db_path = Path(self._sqlite_path or "./data/main_agent.db").expanduser()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        checkpointer_conn = await aiosqlite.connect(str(db_path))
+        # AsyncSqliteStore.setup() 会执行迁移写入；Store 连接必须开启
+        # autocommit，否则最后一条写事务会一直占用数据库写锁。
+        store_conn = await aiosqlite.connect(
+            str(db_path),
+            isolation_level=None,
+        )
+        try:
+            self._checkpointer = AsyncSqliteSaver(checkpointer_conn)
+            await self._checkpointer.setup()
+            self._store = AsyncSqliteStore(store_conn)
+            await self._store.setup()
+        except Exception:
+            await checkpointer_conn.close()
+            await store_conn.close()
+            raise
+
+        self._async_connections = (checkpointer_conn, store_conn)
+        self._sqlite_path = str(db_path)
+
     def _build_graph(self):
-        """构建编排器 LangGraph 图:
+        """构建编排器 LangGraph 图 (异步节点):
         analyze → (simple? → respond) → plan → execute → synthesize → END
                   execute 内部: dispatch → (fail? → retry execute)
         """
 
         # ── 节点定义 ──
 
-        def analyze_node(state: MainAgentState, config: RunnableConfig) -> dict:
-            self._raise_if_cancelled(config)
+        async def analyze_node(state: MainAgentState, config: RunnableConfig) -> dict:
+            await self._check_cancelled(config)
             """分析用户任务"""
             user_task = state.get("user_task", "")
             subagent_list = self.sub_agent_registry.build_selection_prompt()
@@ -216,8 +211,11 @@ class MainAgent(BaseAgent):
                 SystemMessage(content=MAIN_AGENT_SYSTEM_PROMPT),
                 HumanMessage(content=prompt),
             ]
-            structured_model = self.model.with_structured_output(TaskAnalysisOutput)
-            response = structured_model.invoke(messages)
+            response = await self._ainvoke_structured(
+                TaskAnalysisOutput,
+                messages,
+                strict=True,
+            )
 
             self.logger.info(
                 "Analyze: needs_subagents=%s, complexity=%s, suggested=%s",
@@ -234,22 +232,22 @@ class MainAgent(BaseAgent):
                 )],
             }
 
-        def respond_node(state: MainAgentState, config: RunnableConfig) -> dict:
-            self._raise_if_cancelled(config)
+        async def respond_node(state: MainAgentState, config: RunnableConfig) -> dict:
+            await self._check_cancelled(config)
             """简单任务直接回答"""
             user_task = state.get("user_task", "")
             messages = [
                 SystemMessage(content=MAIN_AGENT_SYSTEM_PROMPT),
                 HumanMessage(content=build_direct_response_prompt(user_task)),
             ]
-            response = self.model.invoke(messages)
+            response = await self.model.ainvoke(messages)
             return {
                 "synthesized_answer": response.content if response.content else "",
                 "messages": [response],
             }
 
-        def plan_node(state: MainAgentState, config: RunnableConfig) -> dict:
-            self._raise_if_cancelled(config)
+        async def plan_node(state: MainAgentState, config: RunnableConfig) -> dict:
+            await self._check_cancelled(config)
             """生成执行计划"""
             user_task = state.get("user_task", "")
             task_summary = state.get("task_summary", "")
@@ -263,19 +261,32 @@ class MainAgent(BaseAgent):
 
             prompt = match_subagents(user_task, task_summary, subagent_context)
             messages = [HumanMessage(content=prompt)]
-            structured_model = self.model.with_structured_output(SubagentMatchOutput)
-            response = structured_model.invoke(messages)
+            response = await self._ainvoke_structured(
+                SubagentMatchOutput,
+                messages,
+            )
 
-            plan = [
-                {
-                    "step_id": s.step_id,
-                    "description": s.description,
-                    "subagent_type": s.subagent_type,
-                    "input_summary": s.input_summary,
-                    "depends_on": s.depends_on,
-                }
-                for s in response.plan
-            ]
+            available_types = set(self.sub_agent_registry.list_types())
+            plan = []
+            for step_output in response.plan:
+                subagent_type = self._normalize_subagent_type(
+                    step_output.subagent_type
+                )
+                if (
+                    subagent_type is not None
+                    and subagent_type not in available_types
+                ):
+                    raise ValueError(
+                        "执行计划包含未注册的 SubAgent 类型: "
+                        f"{subagent_type}"
+                    )
+                plan.append({
+                    "step_id": step_output.step_id,
+                    "description": step_output.description,
+                    "subagent_type": subagent_type,
+                    "input_summary": step_output.input_summary,
+                    "depends_on": step_output.depends_on,
+                })
 
             self.logger.info("Plan: %d steps — %s", len(plan), response.overall_strategy)
             return {
@@ -290,8 +301,8 @@ class MainAgent(BaseAgent):
                 ],
             }
 
-        def execute_node(state: MainAgentState, config: RunnableConfig) -> dict:
-            self._raise_if_cancelled(config)
+        async def execute_node(state: MainAgentState, config: RunnableConfig) -> dict:
+            await self._check_cancelled(config)
             """执行当前步骤 — 调度 subagent"""
             plan = state.get("plan", [])
             step_idx = state.get("current_step_index", 0)
@@ -304,7 +315,9 @@ class MainAgent(BaseAgent):
 
             step = plan[step_idx]
             step_id = str(step["step_id"])
-            subagent_type = step.get("subagent_type")
+            subagent_type = self._normalize_subagent_type(
+                step.get("subagent_type")
+            )
 
             self.logger.info("Execute step %d/%d: %s → %s",
                              step_idx + 1, len(plan), step_id, subagent_type or "direct")
@@ -321,7 +334,7 @@ class MainAgent(BaseAgent):
                     HumanMessage(content=prompt),
                 ]
                 try:
-                    response = self.model.invoke(messages)
+                    response = await self.model.ainvoke(messages)
                     results[step_id] = response.content if response else ""
                     statuses[step_id] = "success"
                 except AgentRunCancelled:
@@ -332,22 +345,27 @@ class MainAgent(BaseAgent):
                     statuses[step_id] = "failed"
             else:
                 # 调度 subagent
+                if self.sub_agent_registry.get(subagent_type) is None:
+                    raise ValueError(
+                        "执行计划包含未注册的 SubAgent 类型: "
+                        f"{subagent_type}"
+                    )
                 try:
-                    sub = self._get_or_create_subagent(subagent_type)
+                    sub = await self._get_or_create_subagent(subagent_type)
                     context = self._build_context_for_step(step, results)
                     delegation_task = build_delegation_task_prompt(
                         step["description"],
                         context,
                         state.get("user_task", ""),
                     )
-                    result = sub.run(
+                    result = await sub.arun(
                         delegation_task,
                         context=context,
                         cancellation_event=self._cancellation_events.get(
                             config.get("configurable", {}).get("thread_id")
                         ),
                     )
-                    self._raise_if_cancelled(config)
+                    await self._check_cancelled(config)
                     results[step_id] = result
                     statuses[step_id] = "success"
                 except AgentRunCancelled:
@@ -390,8 +408,8 @@ class MainAgent(BaseAgent):
                 ],
             }
 
-        def synthesize_node(state: MainAgentState, config: RunnableConfig) -> dict:
-            self._raise_if_cancelled(config)
+        async def synthesize_node(state: MainAgentState, config: RunnableConfig) -> dict:
+            await self._check_cancelled(config)
             """综合所有 subagent 结果"""
             user_task = state.get("user_task", "")
             results = state.get("subagent_results", {})
@@ -411,8 +429,10 @@ class MainAgent(BaseAgent):
 
             prompt = aggregate_results(user_task, "\n\n".join(result_lines))
             messages = [HumanMessage(content=prompt)]
-            structured_model = self.model.with_structured_output(AggregationOutput)
-            response = structured_model.invoke(messages)
+            response = await self._ainvoke_structured(
+                AggregationOutput,
+                messages,
+            )
 
             self.logger.info("Synthesize: confidence=%s, sources=%s",
                              response.confidence, response.sources)
@@ -475,19 +495,19 @@ class MainAgent(BaseAgent):
             "Graph compiled: analyze→(respond|plan→execute(retry)→synthesize)"
         )
 
-    # ═══ 执行 (同步) ═══
+    # ═══ 执行 (异步) ═══
 
-    def run(
+    async def arun(
         self,
         user_task: str,
         thread_id: str | None = None,
-        cancellation_event: threading.Event | None = None,
+        cancellation_event: asyncio.Event | None = None,
     ) -> str:
-        """执行用户任务 (同步)
+        """执行用户任务 (异步)
 
         返回: 最终回答文本
         """
-        self.initialize()
+        await self.ainitialize()
         tid = thread_id or str(uuid.uuid4())[:12]
         if cancellation_event is not None:
             self._cancellation_events[tid] = cancellation_event
@@ -505,26 +525,23 @@ class MainAgent(BaseAgent):
         }
 
         try:
-            result = self._graph.invoke(initial_state, config)
+            result = await self._graph.ainvoke(initial_state, config)
             return result.get("synthesized_answer", "无法完成任务")
         finally:
             self._cancellation_events.pop(tid, None)
 
-    def run_stream(
+    async def arun_stream(
         self,
         user_task: str,
         thread_id: str | None = None,
-        cancellation_event: threading.Event | None = None,
-    ) -> Generator[dict, None, str]:
-        """执行任务 (同步流式)
+        cancellation_event: asyncio.Event | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """执行任务 (异步流式)
 
         Yields:
             dict: {event, data} SSE event
-
-        Returns:
-            str: 最终回答 (generator return)
         """
-        self.initialize()
+        await self.ainitialize()
         tid = thread_id or str(uuid.uuid4())[:12]
         if cancellation_event is not None:
             self._cancellation_events[tid] = cancellation_event
@@ -542,107 +559,131 @@ class MainAgent(BaseAgent):
         }
 
         last_node = None
-        final_answer = ""
-
-        for chunk, metadata in self._graph.stream(
-            initial_state, config, stream_mode="messages"
-        ):
-            node_name = metadata.get("langgraph_node", "")
-            if isinstance(chunk, AIMessage) and chunk.content:
-                text = self._message_chunk_text(chunk.content)
-                if text:
-                    yield {
-                        "event": MultiAgentEvent.TOKEN,
-                        "data": {"text": text, "agent": "main"},
-                    }
-
-            # 节点转换事件
-            if node_name != last_node:
-                event = self._node_to_event(node_name)
-                if event:
-                    yield event
-                last_node = node_name
-
-        # 获取最终状态
-        final_state = self._graph.get_state(config)
-        if final_state and final_state.values:
-            final_answer = final_state.values.get("synthesized_answer", "")
-
-        yield {
-            "event": MultiAgentEvent.DONE,
-            "data": {"session_id": tid},
-        }
-
-        return final_answer
-
-    # ═══ 执行 (异步) ═══
-
-    async def arun(
-        self,
-        user_task: str,
-        thread_id: str | None = None,
-        cancellation_event: threading.Event | None = None,
-    ) -> str:
-        """执行任务 (异步)"""
-        return await asyncio.to_thread(
-            self.run, user_task, thread_id, cancellation_event
-        )
-
-    async def arun_stream(
-        self,
-        user_task: str,
-        thread_id: str | None = None,
-        cancellation_event: threading.Event | None = None,
-    ) -> AsyncGenerator[dict, None]:
-        """执行任务 (异步流式)"""
-        effective_tid = thread_id or str(uuid.uuid4())[:12]
-        gen = self.run_stream(
-            user_task, effective_tid, cancellation_event=cancellation_event
-        )
-        sentinel = object()
-
-        def next_event():
-            return next(gen, sentinel)
 
         try:
-            while True:
-                chunk = await asyncio.to_thread(next_event)
-                if chunk is sentinel:
-                    break
-                yield chunk
+            async for chunk, metadata in self._graph.astream(
+                initial_state, config, stream_mode="messages"
+            ):
+                node_name = metadata.get("langgraph_node", "")
+                if isinstance(chunk, AIMessage) and chunk.content:
+                    text = self._message_chunk_text(chunk.content)
+                    if text:
+                        yield {
+                            "event": MultiAgentEvent.TOKEN,
+                            "data": {"text": text, "agent": "main"},
+                        }
+
+                # 节点转换事件
+                if node_name != last_node:
+                    event = self._node_to_event(node_name)
+                    if event:
+                        yield event
+                    last_node = node_name
+
+            yield {
+                "event": MultiAgentEvent.DONE,
+                "data": {"session_id": tid},
+            }
         finally:
             if cancellation_event is not None:
                 cancellation_event.set()
-            self._cancellation_events.pop(effective_tid, None)
+            self._cancellation_events.pop(tid, None)
+
+    # ═══ 结构化输出 ═══
+
+    async def _ainvoke_structured(
+        self,
+        schema,
+        messages: list,
+        **structured_kwargs,
+    ):
+        """Invoke a structured model and retry parsing failures only.
+
+        ``include_raw=True`` returns parsing and Pydantic validation failures in
+        ``parsing_error``. Request errors raised by ``ainvoke`` (authentication,
+        rate limiting, server errors, network failures, and timeouts) are not
+        caught here and therefore are never mistaken for format failures.
+        """
+        structured_model = self.model.with_structured_output(
+            schema,
+            include_raw=True,
+            **structured_kwargs,
+        )
+        retry_messages = list(messages)
+        total_attempts = self._max_structured_retries + 1
+
+        for attempt in range(1, total_attempts + 1):
+            result = await structured_model.ainvoke(retry_messages)
+            if isinstance(result, dict):
+                raw = result.get("raw")
+                parsed = result.get("parsed")
+                parsing_error = result.get("parsing_error")
+            else:
+                raw = result
+                parsed = None
+                parsing_error = None
+
+            parsed_is_empty = parsed is None or (
+                isinstance(parsed, dict) and not parsed
+            )
+            if not parsed_is_empty and parsing_error is None:
+                return parsed
+
+            error = parsing_error or ValueError(
+                f"{schema.__name__} 返回了空的结构化结果"
+            )
+            self.logger.warning(
+                "Structured output failed: schema=%s attempt=%d/%d raw=%r error=%r",
+                schema.__name__,
+                attempt,
+                total_attempts,
+                raw,
+                error,
+            )
+
+            if attempt >= total_attempts:
+                raise error
+
+            retry_messages = [
+                *messages,
+                HumanMessage(content=build_structured_output_retry_prompt(
+                    schema.__name__,
+                    str(error)[:1500],
+                )),
+            ]
+
+        raise RuntimeError(f"{schema.__name__} 结构化输出重试状态异常")
 
     # ═══ SubAgent 管理 ═══
 
-    def _get_or_create_subagent(self, subagent_type: str) -> SubAgent:
-        """按需获取或创建 SubAgent 实例"""
+    async def _get_or_create_subagent(self, subagent_type: str) -> SubAgent:
+        """按需获取或创建 SubAgent 实例 (异步初始化)"""
         if subagent_type not in self._sub_agents_cache:
             meta = self.sub_agent_registry.get(subagent_type)
             if meta is None:
                 raise ValueError(f"未知的 SubAgent 类型: {subagent_type}")
 
+            sub = None
             if meta.factory is not None:
                 sub = meta.factory()
-                if sub is not None:
-                    sub.initialize()
-                    self._sub_agents_cache[subagent_type] = sub
-                    self.logger.info("创建 SubAgent: %s", subagent_type)
-                    return sub
 
-            # 使用默认工厂
-            sub = SubAgent(
-                name=meta.display_name,
-                subagent_type=meta.subagent_type,
-                description=meta.description,
-                capabilities=meta.capabilities,
-                store_type=self._store_type,
-                sqlite_path=self._subagent_sqlite_path(meta.subagent_type),
-            )
-            sub.initialize()
+            if sub is None:
+                sub = SubAgent(
+                    name=meta.display_name,
+                    subagent_type=meta.subagent_type,
+                    description=meta.description,
+                    capabilities=meta.capabilities,
+                    store_type=self._store_type,
+                    sqlite_path=self._subagent_sqlite_path(meta.subagent_type),
+                )
+
+            # MCP 工具由 create_default_registry 的 factory 注入（方案2），
+            # 这里不再用 MainAgent 的 _mcp_tools 覆盖，否则会清空 factory 注入的工具。
+            # sub._mcp_tools = self._mcp_tools
+            # sub._mcp_tools_meta = self._mcp_tools_meta
+            await sub.ainitialize()
             self._sub_agents_cache[subagent_type] = sub
+            self.logger.info("创建 SubAgent: %s", subagent_type)
 
         return self._sub_agents_cache[subagent_type]
 
@@ -680,6 +721,14 @@ class MainAgent(BaseAgent):
         return "\n\n".join(context_parts)
 
     # ═══ 辅助方法 ═══
+
+    @staticmethod
+    def _normalize_subagent_type(value) -> str | None:
+        """将空白的 subagent 类型统一转换为 direct 步骤标记。"""
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
 
     @staticmethod
     def _node_to_event(node_name: str) -> dict | None:
@@ -726,7 +775,7 @@ class MainAgent(BaseAgent):
             return "".join(parts)
         return str(content) if content else ""
 
-    def _raise_if_cancelled(self, config: RunnableConfig) -> None:
+    async def _check_cancelled(self, config: RunnableConfig) -> None:
         thread_id = config.get("configurable", {}).get("thread_id")
         cancellation_event = self._cancellation_events.get(thread_id)
         if cancellation_event is not None and cancellation_event.is_set():
@@ -757,6 +806,30 @@ class MainAgent(BaseAgent):
                 connection.close()
             except sqlite3.Error as exc:
                 self.logger.warning("关闭 SQLite 连接失败: %s", exc)
+        self._checkpointer = None
+        self._store = None
+        self.logger.info("MainAgent 已关闭")
+
+    async def aclose(self):
+        """异步清理所有 subagent 和资源（关闭 aiosqlite 连接）。"""
+        for sub in self._sub_agents_cache.values():
+            try:
+                await sub.aclose()
+            except Exception:
+                pass
+        self._sub_agents_cache.clear()
+
+        self._graph = None
+        for cancellation_event in self._cancellation_events.values():
+            cancellation_event.set()
+        self._cancellation_events.clear()
+        connections = self._async_connections
+        self._async_connections = ()
+        for connection in reversed(connections):
+            try:
+                await connection.close()
+            except Exception as exc:
+                self.logger.warning("关闭异步 SQLite 连接失败: %s", exc)
         self._checkpointer = None
         self._store = None
         self.logger.info("MainAgent 已关闭")

@@ -7,6 +7,7 @@ MainAgent.analyze_task 节点使用。
 将用户自然语言任务转化为结构化分析结果。
 ===========================================================================
 """
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from ...prompt.planning import ANALYZE_TASK_PROMPT
@@ -28,11 +29,10 @@ class TaskAnalysisOutput(BaseModel):
     task_summary: str = Field(
         description="对用户任务的结构化摘要 (1-3 句话)",
     )
-    complexity: str = Field(
+    complexity: Literal["simple", "medium", "complex"] = Field(
         description="任务复杂度: simple / medium / complex",
     )
     suggested_subagents: list[str] = Field(
-        default_factory=list,
         description="建议调用的 subagent 类型列表 (从可用列表中选取)",
     )
     reason: str = Field(

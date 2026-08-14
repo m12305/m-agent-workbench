@@ -92,7 +92,7 @@ async def get_messages(
             identity.user_id, session_id,
         )
     else:
-        stored_messages = multi_agent_service.get_session_messages(
+        stored_messages = await multi_agent_service.get_session_messages(
             identity.user_id, session_id,
         )
 
@@ -146,7 +146,7 @@ async def delete_session(
 
     if session.session_type == "multi_agent":
         try:
-            multi_agent_service.delete_session_state(
+            await multi_agent_service.delete_session_state(
                 identity.user_id, session_id,
             )
         except MultiAgentSessionBusyError as exc:

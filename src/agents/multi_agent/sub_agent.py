@@ -1,6 +1,6 @@
 """
 ===========================================================================
-SubAgent — Plan-and-Solve 子执行器
+SubAgent — Plan-and-Solve 子执行器（异步）
 ===========================================================================
 
 基于 LangGraph 的 Plan-and-Solve 智能体:
@@ -14,26 +14,21 @@ Tool 隔离:
     - L1: GENERAL_TOOLS (共享函数引用)
     - L3: 单智能体规划 tools (prompt 函数)
     - L4: 本 subagent 专属 API tools (构造参数注入)
+    - MCP: 外部 MCP Server 发现的工具 (async-only，仅异步图可用)
 
 使用:
-    sub = SubAgent(
-        name="DataAnalyst",
-        subagent_type="data_analyst",
-        description="擅长数据分析",
-        capabilities=["data_query", "statistics"],
-        api_tools=[sql_query, chart_data],
-    )
-    sub.initialize()
-    result = sub.run("查询上月销售总额并按地区分组")
+    sub = SubAgent(name="DataAnalyst", subagent_type="data_analyst",
+                   api_tools=[sql_query], mcp_tools=[...])
+    await sub.ainitialize()
+    result = await sub.arun("查询上月销售总额并按地区分组")
 ===========================================================================
 """
 
 import asyncio
 import sqlite3
-import threading
 import uuid
 from pathlib import Path
-from typing import AsyncGenerator, Generator
+from typing import AsyncGenerator
 
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
@@ -50,7 +45,6 @@ from ...tools.general import GENERAL_TOOLS
 from ...tools.single_agent_planning.task_decomposer import (
     decompose_task, DecompositionOutput,
 )
-from ...tools.single_agent_planning.step_tracker import StepTracker
 from ...tools.single_agent_planning.self_evaluator import (
     evaluate_result, EvaluationOutput,
 )
@@ -82,6 +76,7 @@ class SubAgent(BaseAgent):
         description:     能力描述 (LLM 选择依据)
         capabilities:    能力标签列表
         api_tools:       本 subagent 专属的 L4 API tools 列表
+        mcp_tools:       外部 MCP 工具列表 (async-only)
         model_kwargs:    传递给 get_model() 的额外参数
         store_type:      存储类型: "memory" | "sqlite"
         sqlite_path:     SQLite 路径 (store_type="sqlite" 时)
@@ -98,6 +93,8 @@ class SubAgent(BaseAgent):
         model_kwargs: dict | None = None,
         store_type: str = "memory",
         sqlite_path: str | None = None,
+        mcp_tools: list | None = None,
+        mcp_tools_meta: dict[str, dict] | None = None,
         **kwargs,
     ):
         super().__init__(name=name, **kwargs)
@@ -109,6 +106,8 @@ class SubAgent(BaseAgent):
         self._model_kwargs = model_kwargs or {}
         self._store_type = store_type
         self._sqlite_path = sqlite_path
+        self._mcp_tools = mcp_tools or []
+        self._mcp_tools_meta = mcp_tools_meta or {}
 
         # 在 _setup 中设置
         self.tool_registry: ToolRegistry | None = None
@@ -116,12 +115,13 @@ class SubAgent(BaseAgent):
         self._checkpointer = None
         self._store = None
         self._sqlite_connections: tuple[sqlite3.Connection, ...] = ()
-        self._cancellation_events: dict[str, threading.Event] = {}
+        self._async_connections: tuple = ()
+        self._cancellation_events: dict[str, asyncio.Event] = {}
 
     # ═══ 初始化 ═══
 
     def _setup(self, **kwargs):
-        """初始化 SubAgent 组件"""
+        """初始化 SubAgent 组件 (模型 + 工具注册中心 + 图构建)"""
         logger = get_logger(f"SubAgent.{self.name}")
 
         # 1. 模型
@@ -139,67 +139,71 @@ class SubAgent(BaseAgent):
                 self.tool_registry.register_with_meta(self._api_tools, self._api_tools_meta)
             else:
                 self.tool_registry.register_many(self._api_tools, category="backend_api")
+        # MCP: 外部工具 (async-only)
+        if self._mcp_tools:
+            self.tool_registry.register_with_meta(self._mcp_tools, self._mcp_tools_meta)
         logger.info(
-            "ToolRegistry: %d tools (L1=%d, L4=%d)",
+            "ToolRegistry: %d tools (L1=%d, L4=%d, MCP=%d)",
             self.tool_registry.tool_count,
             len(GENERAL_TOOLS),
             len(self._api_tools),
+            len(self._mcp_tools),
         )
 
-        # 3. 存储
-        if self._store_type == "sqlite":
-            try:
-                from langgraph.checkpoint.sqlite import SqliteSaver
-                from langgraph.store.sqlite import SqliteStore
-            except ImportError:
-                logger.warning("langgraph-checkpoint-sqlite 未安装，回退到内存存储")
-                self._checkpointer = MemorySaver()
-                self._store = InMemoryStore()
-            else:
-                db_path = Path(self._sqlite_path or "./data/subagent.db").expanduser()
-                db_path.parent.mkdir(parents=True, exist_ok=True)
-
-                checkpointer_conn = sqlite3.connect(
-                    str(db_path),
-                    check_same_thread=False,
-                    timeout=30.0,
-                )
-                store_conn = None
-                try:
-                    store_conn = sqlite3.connect(
-                        str(db_path),
-                        check_same_thread=False,
-                        isolation_level=None,
-                        timeout=30.0,
-                    )
-                    checkpointer_conn.execute("PRAGMA busy_timeout = 30000")
-                    store_conn.execute("PRAGMA busy_timeout = 30000")
-
-                    self._checkpointer = SqliteSaver(checkpointer_conn)
-                    self._checkpointer.setup()
-                    self._store = SqliteStore(store_conn)
-                    self._store.setup()
-                except Exception:
-                    checkpointer_conn.close()
-                    if store_conn is not None:
-                        store_conn.close()
-                    raise
-
-                self._sqlite_connections = (checkpointer_conn, store_conn)
-                self._sqlite_path = str(db_path)
-                logger.info("SQLite 存储: %s", db_path)
-        else:
-            self._checkpointer = MemorySaver()
-            self._store = InMemoryStore()
-
-        # 4. 构建图
+        # 3. 构建图
         if CAN_RUN and self.model is not None:
             self._build_graph()
         else:
             logger.warning("跳过图构建 (无可用模型)")
 
+    async def ainitialize(self):
+        """异步初始化：SQLite 走异步 store，memory 走同步 MemorySaver。"""
+        if self._initialized:
+            return
+        if self._store_type == "sqlite":
+            await self._setup_async_store()
+        else:
+            self._checkpointer = MemorySaver()
+            self._store = InMemoryStore()
+        self._setup()
+        self._initialized = True
+
+    async def _setup_async_store(self):
+        """SQLite 异步 checkpointer/store（aiosqlite + AsyncSqliteSaver/Store）。"""
+        try:
+            import aiosqlite
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            from langgraph.store.sqlite.aio import AsyncSqliteStore
+        except ImportError:
+            self._checkpointer = MemorySaver()
+            self._store = InMemoryStore()
+            return
+
+        db_path = Path(self._sqlite_path or "./data/subagent.db").expanduser()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        checkpointer_conn = await aiosqlite.connect(str(db_path))
+        # AsyncSqliteStore.setup() 会执行迁移写入；Store 连接必须开启
+        # autocommit，否则最后一条写事务会一直占用数据库写锁。
+        store_conn = await aiosqlite.connect(
+            str(db_path),
+            isolation_level=None,
+        )
+        try:
+            self._checkpointer = AsyncSqliteSaver(checkpointer_conn)
+            await self._checkpointer.setup()
+            self._store = AsyncSqliteStore(store_conn)
+            await self._store.setup()
+        except Exception:
+            await checkpointer_conn.close()
+            await store_conn.close()
+            raise
+
+        self._async_connections = (checkpointer_conn, store_conn)
+        self._sqlite_path = str(db_path)
+
     def _build_graph(self):
-        """构建 Plan-and-Solve LangGraph 图:
+        """构建 Plan-and-Solve LangGraph 图 (异步节点):
         plan → execute(ReAct) → evaluate → (needs_revision? → plan | → report) → END
         """
         # 绑定 tools 用于 execute 节点的 ReAct 循环
@@ -208,8 +212,8 @@ class SubAgent(BaseAgent):
 
         # ── 节点定义 ──
 
-        def plan_node(state: SubAgentState, config: RunnableConfig) -> dict:
-            self._raise_if_cancelled(config)
+        async def plan_node(state: SubAgentState, config: RunnableConfig) -> dict:
+            await self._check_cancelled(config)
             """分解任务为子步骤"""
             prompt = decompose_task(
                 assigned_task=state.get("assigned_task", ""),
@@ -225,7 +229,7 @@ class SubAgent(BaseAgent):
             )), HumanMessage(content=prompt)]
 
             structured_model = self.model.with_structured_output(DecompositionOutput)
-            response = structured_model.invoke(messages)
+            response = await structured_model.ainvoke(messages)
 
             sub_plan = [
                 {"step_id": s.step_id, "description": s.description,
@@ -243,8 +247,8 @@ class SubAgent(BaseAgent):
                 "messages": [AIMessage(content=f"计划已生成: {response.strategy}")],
             }
 
-        def agent_node(state: SubAgentState, config: RunnableConfig) -> dict:
-            self._raise_if_cancelled(config)
+        async def agent_node(state: SubAgentState, config: RunnableConfig) -> dict:
+            await self._check_cancelled(config)
             """ReAct agent 节点 — 决定调用工具或输出文本"""
             step_idx = state.get("current_step_index", 0)
             sub_plan = state.get("sub_plan", [])
@@ -267,24 +271,23 @@ class SubAgent(BaseAgent):
             if step_instruction:
                 messages.append(HumanMessage(content=step_instruction))
 
-            response = model_with_tools.invoke(messages)
-            self._raise_if_cancelled(config)
+            response = await model_with_tools.ainvoke(messages)
+            await self._check_cancelled(config)
             return {
                 "messages": [response],
                 "react_iteration_count": state.get("react_iteration_count", 0) + 1,
             }
 
-        def tools_node(state: SubAgentState, config: RunnableConfig) -> dict:
-            self._raise_if_cancelled(config)
+        async def tools_node(state: SubAgentState, config: RunnableConfig) -> dict:
+            await self._check_cancelled(config)
             """工具执行节点"""
-            tool_node = ToolNode(tools)
-            result = tool_node.invoke({"messages": state["messages"]})
-            self._raise_if_cancelled(config)
+            result = await ToolNode(tools).ainvoke({"messages": state["messages"]})
+            await self._check_cancelled(config)
             return result
 
-        def advance_step_node(state: SubAgentState, config: RunnableConfig) -> dict:
+        async def advance_step_node(state: SubAgentState, config: RunnableConfig) -> dict:
             """Persist the current output and move to the next planned step."""
-            self._raise_if_cancelled(config)
+            await self._check_cancelled(config)
             step_idx = state.get("current_step_index", 0)
             sub_plan = state.get("sub_plan", [])
             step_id = str(
@@ -302,8 +305,8 @@ class SubAgent(BaseAgent):
                 "react_iteration_count": 0,
             }
 
-        def evaluate_node(state: SubAgentState, config: RunnableConfig) -> dict:
-            self._raise_if_cancelled(config)
+        async def evaluate_node(state: SubAgentState, config: RunnableConfig) -> dict:
+            await self._check_cancelled(config)
             """自评结果质量"""
             sub_plan = state.get("sub_plan", [])
             step_results = {
@@ -326,7 +329,7 @@ class SubAgent(BaseAgent):
             )
             messages = [HumanMessage(content=prompt)]
             structured_model = self.model.with_structured_output(EvaluationOutput)
-            response = structured_model.invoke(messages)
+            response = await structured_model.ainvoke(messages)
 
             self.logger.info(
                 "Evaluate: needs_revision=%s, completeness=%s, accuracy=%s",
@@ -341,8 +344,8 @@ class SubAgent(BaseAgent):
                 "messages": [AIMessage(content=f"自评: {response.feedback}")],
             }
 
-        def report_node(state: SubAgentState, config: RunnableConfig) -> dict:
-            self._raise_if_cancelled(config)
+        async def report_node(state: SubAgentState, config: RunnableConfig) -> dict:
+            await self._check_cancelled(config)
             """格式化最终结果"""
             step_results = {
                 key: value
@@ -433,26 +436,21 @@ class SubAgent(BaseAgent):
         )
         self.logger.info("Graph compiled: plan → agent→tools?→advance → evaluate → (plan|report)")
 
-    # ═══ 执行 (同步) ═══
+    # ═══ 执行 (异步) ═══
 
-    def run(
+    async def arun(
         self,
         assigned_task: str,
         thread_id: str | None = None,
         context: str = "",
-        cancellation_event: threading.Event | None = None,
+        cancellation_event: asyncio.Event | None = None,
     ) -> str:
-        """执行分配的任务 (同步)
-
-        参数:
-            assigned_task: MainAgent 分配的任务描述
-            thread_id:     会话隔离 ID (默认自动生成)
-            context:       来自前置步骤的上下文
+        """执行分配的任务 (异步)
 
         返回:
             执行结果文本
         """
-        self.initialize()
+        await self.ainitialize()
         tid = thread_id or str(uuid.uuid4())[:12]
         if cancellation_event is not None:
             self._cancellation_events[tid] = cancellation_event
@@ -477,27 +475,24 @@ class SubAgent(BaseAgent):
         }
 
         try:
-            result = self._graph.invoke(initial_state, config)
+            result = await self._graph.ainvoke(initial_state, config)
             return result.get("final_result", "")
         finally:
             self._cancellation_events.pop(tid, None)
 
-    def run_stream(
+    async def arun_stream(
         self,
         assigned_task: str,
         thread_id: str | None = None,
         context: str = "",
-        cancellation_event: threading.Event | None = None,
-    ) -> Generator[dict, None, str]:
-        """执行任务 (同步流式)
+        cancellation_event: asyncio.Event | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """执行任务 (异步流式)
 
         Yields:
             dict: {event, data} SSE 事件
-
-        Returns:
-            str: 最终结果 (generator return)
         """
-        self.initialize()
+        await self.ainitialize()
         tid = thread_id or str(uuid.uuid4())[:12]
         if cancellation_event is not None:
             self._cancellation_events[tid] = cancellation_event
@@ -522,90 +517,48 @@ class SubAgent(BaseAgent):
         }
 
         final_result = ""
-        tracker = StepTracker()
-
-        for chunk, metadata in self._graph.stream(
-            initial_state, config, stream_mode="messages"
-        ):
-            node_name = metadata.get("langgraph_node", "")
-            if isinstance(chunk, AIMessage) and chunk.content:
-                text = self._message_chunk_text(chunk.content)
-                if text:
-                    yield {"event": "token", "data": {"text": text, "agent": self.subagent_type}}
-
-            # 检测节点转换
-            if node_name == "plan" and not final_result:
-                yield {
-                    "event": "subagent_plan",
-                    "data": {"subagent_type": self.subagent_type, "plan": []},
-                }
-            elif node_name == "evaluate":
-                yield {
-                    "event": "subagent_step",
-                    "data": {
-                        "subagent_type": self.subagent_type,
-                        "status": "evaluating",
-                    },
-                }
-
-        # 获取最终状态
-        final_state = self._graph.get_state(config)
-        if final_state and final_state.values:
-            final_result = final_state.values.get("final_result", "")
-
-        yield {
-            "event": "subagent_done",
-            "data": {
-                "subagent_type": self.subagent_type,
-                "result_summary": final_result[:200] if final_result else "",
-                "success": bool(final_result),
-            },
-        }
-
-        return final_result
-
-    # ═══ 执行 (异步) ═══
-
-    async def arun(
-        self,
-        assigned_task: str,
-        thread_id: str | None = None,
-        context: str = "",
-        cancellation_event: threading.Event | None = None,
-    ) -> str:
-        """执行任务 (异步)"""
-        return await asyncio.to_thread(
-            self.run, assigned_task, thread_id, context, cancellation_event
-        )
-
-    async def arun_stream(
-        self,
-        assigned_task: str,
-        thread_id: str | None = None,
-        context: str = "",
-        cancellation_event: threading.Event | None = None,
-    ) -> AsyncGenerator[dict, None]:
-        """执行任务 (异步流式)"""
-        cancel = cancellation_event or threading.Event()
-        effective_tid = thread_id or str(uuid.uuid4())[:12]
-        gen = self.run_stream(
-            assigned_task, effective_tid, context, cancellation_event=cancel
-        )
-        sentinel = object()
-
-        def next_event():
-            return next(gen, sentinel)
-
-        # 在线程池中运行同步生成器
         try:
-            while True:
-                chunk = await asyncio.to_thread(next_event)
-                if chunk is sentinel:
-                    break
-                yield chunk
+            async for chunk, metadata in self._graph.astream(
+                initial_state, config, stream_mode="messages"
+            ):
+                node_name = metadata.get("langgraph_node", "")
+                if isinstance(chunk, AIMessage) and chunk.content:
+                    text = self._message_chunk_text(chunk.content)
+                    if text:
+                        yield {"event": "token", "data": {"text": text, "agent": self.subagent_type}}
+
+                # 检测节点转换
+                if node_name == "plan" and not final_result:
+                    yield {
+                        "event": "subagent_plan",
+                        "data": {"subagent_type": self.subagent_type, "plan": []},
+                    }
+                elif node_name == "evaluate":
+                    yield {
+                        "event": "subagent_step",
+                        "data": {
+                            "subagent_type": self.subagent_type,
+                            "status": "evaluating",
+                        },
+                    }
+
+            # 获取最终状态
+            final_state = await self._graph.aget_state(config)
+            if final_state and final_state.values:
+                final_result = final_state.values.get("final_result", "")
+
+            yield {
+                "event": "subagent_done",
+                "data": {
+                    "subagent_type": self.subagent_type,
+                    "result_summary": final_result[:200] if final_result else "",
+                    "success": bool(final_result),
+                },
+            }
         finally:
-            cancel.set()
-            self._cancellation_events.pop(effective_tid, None)
+            if cancellation_event is not None:
+                cancellation_event.set()
+            self._cancellation_events.pop(tid, None)
 
     # ═══ 辅助方法 ═══
 
@@ -657,7 +610,7 @@ class SubAgent(BaseAgent):
                     return text
         return "（该步骤未返回可用结果）"
 
-    def _raise_if_cancelled(self, config: RunnableConfig) -> None:
+    async def _check_cancelled(self, config: RunnableConfig) -> None:
         thread_id = config.get("configurable", {}).get("thread_id")
         cancellation_event = self._cancellation_events.get(thread_id)
         if cancellation_event is not None and cancellation_event.is_set():
@@ -666,7 +619,7 @@ class SubAgent(BaseAgent):
     # ═══ 生命周期 ═══
 
     def close(self):
-        """清理资源"""
+        """清理资源（同步路径，仅内存场景；SQLite 请用 aclose）。"""
         self._graph = None
         for cancellation_event in self._cancellation_events.values():
             cancellation_event.set()
@@ -680,6 +633,23 @@ class SubAgent(BaseAgent):
                 connection.close()
             except sqlite3.Error as exc:
                 self.logger.warning("关闭 SQLite 连接失败: %s", exc)
+        self._checkpointer = None
+        self._store = None
+        self.logger.info("SubAgent 已关闭")
+
+    async def aclose(self):
+        """异步清理资源（关闭 aiosqlite 连接）。"""
+        self._graph = None
+        for cancellation_event in self._cancellation_events.values():
+            cancellation_event.set()
+        self._cancellation_events.clear()
+        connections = self._async_connections
+        self._async_connections = ()
+        for connection in reversed(connections):
+            try:
+                await connection.close()
+            except Exception as exc:
+                self.logger.warning("关闭异步 SQLite 连接失败: %s", exc)
         self._checkpointer = None
         self._store = None
         self.logger.info("SubAgent 已关闭")

@@ -84,6 +84,18 @@ class BaseAgent(ABC):
         self._initialized = True
         self.logger.info(f"✅ Agent 就绪")
 
+    async def ainitialize(self):
+        """异步初始化（默认等价于同步 initialize；子类可为异步 store 覆盖）。"""
+        if self._initialized:
+            return
+        self.initialize()
+
+    async def aclose(self):
+        """异步关闭（默认等价于同步 close，若子类实现了 close）。"""
+        close = getattr(self, "close", None)
+        if callable(close):
+            close()
+
     @abstractmethod
     def _setup(self, **kwargs):
         """初始化 Agent 组件 (子类实现)

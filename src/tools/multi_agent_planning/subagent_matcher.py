@@ -8,7 +8,7 @@ MainAgent.plan 节点使用。
 ===========================================================================
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from ...prompt.planning import MATCH_SUBAGENT_PROMPT
 
 
@@ -28,6 +28,15 @@ class PlanStepOutput(BaseModel):
         default=None,
         description="分配给哪个 subagent 类型 (不需要子智能体则留空)",
     )
+
+    @field_validator("subagent_type", mode="before")
+    @classmethod
+    def normalize_subagent_type(cls, value):
+        """将模型返回的空字符串统一视为无需子智能体。"""
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
     input_summary: str = Field(
         default="",
         description="传递给 subagent 的输入摘要",

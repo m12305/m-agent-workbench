@@ -1,6 +1,6 @@
 # 文档上传与解析层设计规格
 
-> 日期: 2026-07-29 | 状态: 已确认 | 关联: [design.md](../../../design.md) §5-7, [上一模块](../specs/2026-07-28-fastapi-layer-design.md)
+> 日期: 2026-07-29 | 状态: 已确认 | 关联: [design.md](../../design.md) §5-7, [上一模块](../specs/2026-07-28-fastapi-layer-design.md)
 
 ## 1. 目标与范围
 

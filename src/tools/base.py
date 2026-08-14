@@ -30,7 +30,7 @@ from langchain_core.tools import tool, StructuredTool
 
 @tool
 def get_current_time() -> str:
-    """获取当前日期和时间，返回 ISO 格式的时间字符串。"""
+    """获取当前日期和时间，返回 ISO 格式的时间字符串。返回时区：Asia/Shanghai (UTC+8)"""
     now = datetime.now()
     return f"当前时间: {now.strftime('%Y年%m月%d日 %H:%M:%S')} (星期{['一','二','三','四','五','六','日'][now.weekday()]})"
 
