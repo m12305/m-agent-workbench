@@ -24,12 +24,12 @@ import time
 import argparse
 
 # 确保能导入同目录下的模块
-sys.path.insert(0, ".")
+sys.path.insert(0, "../src")
 
-from config import get_config
-from models import get_model, list_available_providers, CAN_RUN
-from agents import ChatAgent
-from utils.logger import get_logger
+from ..src.config import get_config
+from ..src.models import get_model, list_available_providers, CAN_RUN
+from ..src.agents import ChatAgent
+from ..src.utils.logger import get_logger
 
 logger = get_logger("Main")
 
