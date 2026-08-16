@@ -14,6 +14,10 @@ from .base import (
     Document,
     ChunkRecord,
     TaskRecord,
+    RuntimeConfigRecord,
+    SessionMessage,
+    MultiAgentTurn,
+    ConversationSummary,
 )
 
 class InMemoryUserRepo:
@@ -115,6 +119,93 @@ class InMemorySessionRepo:
 
     async def delete(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
+
+
+class InMemorySessionMessageRepo:
+    def __init__(self):
+        self._messages: dict[str, SessionMessage] = {}
+        self._lock = asyncio.Lock()
+
+    async def create(self, message: SessionMessage) -> SessionMessage:
+        async with self._lock:
+            self._messages[message.message_id] = message
+            return message
+
+    async def list_by_session(self, session_id: str) -> list[SessionMessage]:
+        return [
+            message for message in self._messages.values()
+            if message.session_id == session_id
+        ]
+
+    async def count_by_session(self, session_id: str) -> int:
+        return sum(
+            1 for message in self._messages.values()
+            if message.session_id == session_id
+        )
+
+    async def delete_by_session(self, session_id: str) -> None:
+        async with self._lock:
+            self._messages = {
+                key: value for key, value in self._messages.items()
+                if value.session_id != session_id
+            }
+
+
+class InMemoryMultiAgentTurnRepo:
+    def __init__(self):
+        self._turns: dict[str, MultiAgentTurn] = {}
+        self._lock = asyncio.Lock()
+
+    async def create(self, turn: MultiAgentTurn) -> MultiAgentTurn:
+        async with self._lock:
+            self._turns[turn.turn_id] = turn
+            return turn
+
+    async def get(self, turn_id: str) -> MultiAgentTurn | None:
+        return self._turns.get(turn_id)
+
+    async def list_by_session(self, session_id: str) -> list[MultiAgentTurn]:
+        return [
+            turn for turn in self._turns.values()
+            if turn.session_id == session_id
+        ]
+
+    async def update(self, turn_id: str, **kwargs) -> MultiAgentTurn | None:
+        async with self._lock:
+            turn = self._turns.get(turn_id)
+            if turn is None:
+                return None
+            for key, value in kwargs.items():
+                if hasattr(turn, key):
+                    setattr(turn, key, value)
+            turn.updated_at = datetime.utcnow()
+            return turn
+
+    async def delete_by_session(self, session_id: str) -> None:
+        async with self._lock:
+            self._turns = {
+                key: value for key, value in self._turns.items()
+                if value.session_id != session_id
+            }
+
+
+class InMemoryConversationSummaryRepo:
+    def __init__(self):
+        self._summaries: dict[str, ConversationSummary] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, session_id: str) -> ConversationSummary | None:
+        return self._summaries.get(session_id)
+
+    async def upsert(self, summary: ConversationSummary) -> ConversationSummary:
+        async with self._lock:
+            summary.updated_at = datetime.utcnow()
+            self._summaries[summary.session_id] = summary
+            return summary
+
+    async def delete(self, session_id: str) -> None:
+        async with self._lock:
+            self._summaries.pop(session_id, None)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -228,3 +319,54 @@ class InMemoryTaskRepo:
             task for task in self._tasks.values()
             if task.status not in {"done", "failed"}
         ]
+
+
+class InMemoryRuntimeConfigRepo:
+    """进程内运行时配置仓库，接口与 SQLite 实现保持一致。"""
+
+    def __init__(self):
+        self._records: dict[str, RuntimeConfigRecord] = {}
+        self._lock = asyncio.Lock()
+
+    async def list_by_category(self, category: str) -> list[RuntimeConfigRecord]:
+        records = [
+            record for record in self._records.values()
+            if record.category == category
+        ]
+        return sorted(records, key=lambda item: (item.name.casefold(), item.config_id))
+
+    async def get(self, config_id: str) -> RuntimeConfigRecord | None:
+        return self._records.get(config_id)
+
+    async def upsert(self, record: RuntimeConfigRecord) -> RuntimeConfigRecord:
+        async with self._lock:
+            existing = self._records.get(record.config_id)
+            now = datetime.utcnow()
+            stored = RuntimeConfigRecord(
+                config_id=record.config_id,
+                category=record.category,
+                name=record.name,
+                enabled=record.enabled,
+                payload=record.payload,
+                revision=(existing.revision + 1) if existing else 1,
+                status=record.status,
+                last_error=record.last_error,
+                created_at=existing.created_at if existing else now,
+                updated_at=now,
+            )
+            self._records[stored.config_id] = stored
+            return stored
+
+    async def update_status(
+        self, config_id: str, status: str, last_error: str | None = None,
+    ) -> None:
+        async with self._lock:
+            record = self._records.get(config_id)
+            if record is not None:
+                record.status = status
+                record.last_error = last_error
+                record.updated_at = datetime.utcnow()
+
+    async def delete(self, config_id: str) -> None:
+        async with self._lock:
+            self._records.pop(config_id, None)

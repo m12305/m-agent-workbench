@@ -6,6 +6,7 @@
 .claude/
 # 环境变量
 .env
+.runtime-config.key
 
 # Python
 __pycache__/

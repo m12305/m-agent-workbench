@@ -87,6 +87,18 @@ ANALYZE_TASK_PROMPT = """你是一位资深的 AI 任务分析与路由专家。
 
 {subagent_list}
 
+## 较早对话摘要
+
+{conversation_summary}
+
+## 最近对话
+
+{conversation_context}
+
+## 可复用的历史任务成果
+
+{previous_artifacts}
+
 ## 核心判定原则
 
 请分别判断以下两个维度，不要把它们混为一谈：
@@ -143,11 +155,25 @@ ANALYZE_TASK_PROMPT = """你是一位资深的 AI 任务分析与路由专家。
 
 {user_task}
 
+## 多轮意图识别
+
+- `chat`: 普通交流或不依赖历史任务的静态问答。
+- `new_task`: 与历史无关的新任务。
+- `follow_up`: 对上一轮答案追问、解释或展开。
+- `revise_task`: 修改上一轮任务的目标、约束或输出形式。
+- `continue_task`: 继续之前中止、失败或尚未完成的任务。
+- `resolved_task` 必须消解“继续”“第二点”“按刚才方案”等指代，形成可独立执行的完整任务。
+- 只有确实需要历史计划或结果时才设置 `reuse_previous_artifacts=true`。
+
 ## 输出要求
 
 仅输出一个合法 JSON 对象，不要输出 Markdown 代码块、解释文字、前缀或后缀。字段必须包含：
 
 {{
+  "intent": "chat、new_task、follow_up、revise_task 或 continue_task",
+  "resolved_task": "结合历史上下文补全后的完整任务",
+  "referenced_turn_ids": ["明确引用的历史 turn_id，没有则为空数组"],
+  "reuse_previous_artifacts": true或false,
   "needs_subagents": true或false,
   "task_summary": "对用户任务的简洁摘要",
   "complexity": "simple、medium 或 complex",

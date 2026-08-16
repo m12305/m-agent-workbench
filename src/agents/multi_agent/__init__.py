@@ -51,11 +51,13 @@ def _filter_mcp(
 def create_default_registry(
     mcp_tools: list | None = None,
     mcp_tools_meta: dict[str, dict] | None = None,
+    model_kwargs: dict | None = None,
 ) -> SubAgentRegistry:
     """创建预置了通用 subagent 类型的注册中心
 
     用户可以调用 registry.register() 添加更多 subagent 类型。
     mcp_tools/mcp_tools_meta 按 server 的 subagents 字段分配到各预置 SubAgent。
+    model_kwargs 用于让所有预置 SubAgent 使用同一份运行时模型配置。
     """
     registry = SubAgentRegistry()
 
@@ -77,6 +79,7 @@ def create_default_registry(
             api_tools_meta=TAVILY_TOOLS_META,
             mcp_tools=ga_tools,
             mcp_tools_meta=ga_metas,
+            model_kwargs=model_kwargs,
         ),
     ))
 
@@ -94,6 +97,7 @@ def create_default_registry(
             api_tools_meta=REMOTE_SENSING_TOOLS_META,
             mcp_tools=rs_tools,
             mcp_tools_meta=rs_metas,
+            model_kwargs=model_kwargs,
         ),
     ))
 

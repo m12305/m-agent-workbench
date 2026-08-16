@@ -47,3 +47,8 @@ def get_chat_service(request: Request):
 def get_multi_agent_service(request: Request):
     """获取 MultiAgentService"""
     return request.app.state.multi_agent_service
+
+
+def get_runtime_config_service(request: Request):
+    """获取运行时配置服务。"""
+    return request.app.state.runtime_config_service

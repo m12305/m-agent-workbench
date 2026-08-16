@@ -18,7 +18,7 @@ import json
 import logging
 import asyncio
 
-from fastapi import APIRouter, Depends, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -66,7 +66,6 @@ async def get_multi_agent_service(request: Request) -> MultiAgentService:
 async def multi_agent_chat_stream(
     body: MultiAgentRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
     identity: Identity = Depends(get_identity),
     multi_agent_service: MultiAgentService = Depends(get_multi_agent_service),
     session_service: SessionService = Depends(get_session_service),
@@ -101,6 +100,7 @@ async def multi_agent_chat_stream(
             "data": json.dumps({"session_id": session_id}, ensure_ascii=False),
         }
 
+        terminal_sent = False
         try:
             async for event in multi_agent_service.chat_stream(
                 user_id=identity.user_id,
@@ -113,6 +113,8 @@ async def multi_agent_chat_stream(
                     )
                     return
                 event_type = event.get("event", "message")
+                if event_type == "done":
+                    terminal_sent = True
                 data = event.get("data", {})
                 yield {
                     "event": event_type,
@@ -140,15 +142,11 @@ async def multi_agent_chat_stream(
                 multi_agent_service._make_tid(identity.user_id, session_id)
             )
             return
-        yield {
-            "event": "done",
-            "data": json.dumps({"session_id": session_id}, ensure_ascii=False),
-        }
-
-        # 更新会话消息计数
-        background_tasks.add_task(
-            session_service.bump_message_count, session_id
-        )
+        if not terminal_sent:
+            yield {
+                "event": "done",
+                "data": json.dumps({"session_id": session_id}, ensure_ascii=False),
+            }
 
     return EventSourceResponse(event_generator())
 

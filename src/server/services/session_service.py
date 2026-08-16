@@ -11,8 +11,8 @@ class SessionService:
     """会话管理
 
     会话元数据 (所有权, 标题, 统计) 由 Repository 管理.
-    消息正文由 LangGraph Checkpointer (MemorySaver) 以
-    thread_id = "{user_id}:{session_id}" 管理.
+    Chat 消息仍由对应 Agent 的 Checkpointer 管理；Multi-Agent 的用户可见消息、
+    任务轮次和摘要由独立仓储管理，Checkpointer 只保存编排内部状态。
     """
 
     def __init__(self, session_repo: SessionRepository):
@@ -77,4 +77,12 @@ class SessionService:
             await self._repo.update(
                 session_id,
                 message_count=session.message_count + 2,  # user + assistant
+            )
+
+    async def set_message_count(self, session_id: str, message_count: int) -> None:
+        """以消息仓储的实际数量同步统计，避免失败或中止轮次重复累加。"""
+        if await self._repo.get(session_id):
+            await self._repo.update(
+                session_id,
+                message_count=max(0, int(message_count)),
             )

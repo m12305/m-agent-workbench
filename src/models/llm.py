@@ -45,7 +45,7 @@ PROVIDER_CONFIG = {
     "openai": {
         "name": "ChatGPT",
         "env_key": "OPENAI_API_KEY",
-        "default_model": "ChatGPT-4o",
+        "default_model": "gpt-4o-mini",
         "module": "langchain_openai",
         "class": "ChatOpenAI",
         "base_url": None,  # 使用官方默认
@@ -93,12 +93,21 @@ def list_available_providers() -> list[str]:
     return available
 
 
-def get_model(provider: str = "auto", temperature: float = 0.3, **kwargs):
+def get_model(
+    provider: str = "auto",
+    temperature: float = 0.3,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    **kwargs,
+):
     """获取模型实例 —— 多 Provider 工厂函数
 
     参数:
         provider:    Provider 标识符 (auto / openai / deepseek / anthropic)
+                     auto 时优先读取环境变量 LLM_PROVIDER，未设置才自动检测
         temperature: 生成温度 (0.0~1.0)
+        api_key:     运行时 API Key；未提供时回退到对应环境变量
+        base_url:    运行时 API 地址；未提供时使用 Provider 默认地址
         **kwargs:    传递给模型构造函数的额外参数 (如 model, max_tokens 等)
 
     返回:
@@ -110,7 +119,11 @@ def get_model(provider: str = "auto", temperature: float = 0.3, **kwargs):
         model = get_model(temperature=0.0)           # 确定性输出
         model = get_model(model="gpt-4o")            # 指定模型
     """
-    # 自动选择 Provider
+    # 环境变量指定的 provider（LLM_PROVIDER）优先于 auto 自动检测
+    if provider == "auto":
+        provider = os.getenv("LLM_PROVIDER", "auto")
+
+    # 自动选择 Provider（显式未指定且环境变量未设置时）
     if provider == "auto":
         available = list_available_providers()
         if not available:
@@ -127,8 +140,8 @@ def get_model(provider: str = "auto", temperature: float = 0.3, **kwargs):
         return None
 
     # 检查 API Key
-    api_key = os.getenv(cfg["env_key"])
-    if not api_key:
+    resolved_api_key = api_key or os.getenv(cfg["env_key"])
+    if not resolved_api_key:
         logger.error(f"❌ {cfg['name']} 的 API Key 未配置 (环境变量: {cfg['env_key']})")
         return None
 
@@ -138,10 +151,15 @@ def get_model(provider: str = "auto", temperature: float = 0.3, **kwargs):
         ModelClass = getattr(module, cfg["class"])
 
         model_name = kwargs.pop("model", cfg["default_model"])
-        model_kwargs = {"model": model_name, "temperature": temperature}
+        model_kwargs = {
+            "model": model_name,
+            "temperature": temperature,
+            "api_key": resolved_api_key,
+        }
 
-        if cfg["base_url"]:
-            model_kwargs["base_url"] = cfg["base_url"]
+        resolved_base_url = base_url or cfg["base_url"]
+        if resolved_base_url:
+            model_kwargs["base_url"] = resolved_base_url
 
         model_kwargs.update(kwargs)
 

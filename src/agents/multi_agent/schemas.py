@@ -7,6 +7,8 @@
 ===========================================================================
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -48,6 +50,16 @@ class SubStep(BaseModel):
 
 class TaskAnalysis(BaseModel):
     """MainAgent.analyze_task 的结构化输出"""
+    intent: Literal[
+        "chat", "new_task", "follow_up", "revise_task", "continue_task",
+    ] = Field(description="当前输入相对会话历史的意图类型")
+    resolved_task: str = Field(description="结合上下文消解后的完整可执行任务")
+    referenced_turn_ids: list[str] = Field(
+        description="当前任务明确引用的历史轮次 ID",
+    )
+    reuse_previous_artifacts: bool = Field(
+        description="是否复用历史计划、执行结果或中止进度",
+    )
     needs_subagents: bool = Field(
         description="是否需要多智能体协作",
     )

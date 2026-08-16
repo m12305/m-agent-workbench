@@ -9,6 +9,7 @@ import ConnectView from '../views/ConnectView.vue'
 import KnowledgeView from '../views/KnowledgeView.vue'
 import MultiAgentView from '../views/MultiAgentView.vue'
 import SystemView from '../views/SystemView.vue'
+import SettingsView from '../views/SettingsView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -25,6 +26,7 @@ const router = createRouter({
         { path: 'apps/multi-agent', name: 'multi-agent', component: MultiAgentView },
         { path: 'knowledge', name: 'knowledge', component: KnowledgeView },
         { path: 'admin', name: 'admin', component: AdminView, meta: { adminOnly: true } },
+        { path: 'settings', name: 'settings', component: SettingsView, meta: { adminOnly: true } },
         { path: 'system', name: 'system', component: SystemView },
       ],
     },

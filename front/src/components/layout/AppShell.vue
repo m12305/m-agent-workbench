@@ -19,6 +19,10 @@
           <UsersThree :size="20" aria-hidden="true" />
           <span>用户与密钥</span>
         </RouterLink>
+        <RouterLink v-if="store.isAdmin" :to="{ name: 'settings' }" @click="mobileOpen = false">
+          <SlidersHorizontal :size="20" aria-hidden="true" />
+          <span>配置中心</span>
+        </RouterLink>
         <RouterLink :to="{ name: 'system' }" @click="mobileOpen = false">
           <Pulse :size="20" aria-hidden="true" />
           <span>系统状态</span>
@@ -59,7 +63,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { PhBooks as Books, PhChatCircleDots as ChatCircleDots, PhGraph as Graph, PhGridFour as GridFour, PhList as List, PhPulse as Pulse, PhSignOut as SignOut, PhUsersThree as UsersThree } from '@phosphor-icons/vue'
+import { PhBooks as Books, PhChatCircleDots as ChatCircleDots, PhGraph as Graph, PhGridFour as GridFour, PhList as List, PhPulse as Pulse, PhSignOut as SignOut, PhSlidersHorizontal as SlidersHorizontal, PhUsersThree as UsersThree } from '@phosphor-icons/vue'
 import { useAppStore } from '../../stores/app'
 
 const store = useAppStore()

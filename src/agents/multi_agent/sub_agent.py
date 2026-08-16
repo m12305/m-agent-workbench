@@ -151,7 +151,7 @@ class SubAgent(BaseAgent):
         )
 
         # 3. 构建图
-        if CAN_RUN and self.model is not None:
+        if self.model is not None:
             self._build_graph()
         else:
             logger.warning("跳过图构建 (无可用模型)")

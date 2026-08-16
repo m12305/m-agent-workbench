@@ -12,7 +12,7 @@ from enum import StrEnum
 
 
 class AgentRunCancelled(Exception):
-    """Raised inside synchronous graph workers when the client cancels a run."""
+    """Raised inside graph nodes when the client cancels a run."""
 
 
 class MultiAgentEvent(StrEnum):
@@ -20,6 +20,7 @@ class MultiAgentEvent(StrEnum):
 
     # ── 生命周期 ──
     START = "start"                     # 流开始, data={session_id}
+    TURN_STARTED = "turn_started"       # 对话轮次开始, data={session_id, turn_id}
     DONE = "done"                       # 流结束, data={session_id}
 
     # ── MainAgent 状态 ──
@@ -54,11 +55,13 @@ class MultiAgentEvent(StrEnum):
 
     # ── 错误 ──
     ERROR = "error"                     # 错误, data={code, message, agent}
+    CANCELLED = "cancelled"             # 当前轮次已中止
 
 
 # ── 事件元数据 (API 文档用) ──
 EVENT_SCHEMAS: dict[str, str] = {
     MultiAgentEvent.START:              "{session_id}",
+    MultiAgentEvent.TURN_STARTED:       "{session_id, turn_id}",
     MultiAgentEvent.DONE:               "{session_id}",
     MultiAgentEvent.STATUS:             "{agent, node, message}",
     MultiAgentEvent.ANALYZING:          "{}",
@@ -76,4 +79,5 @@ EVENT_SCHEMAS: dict[str, str] = {
     MultiAgentEvent.TOOL_RESULT:        "{agent, tool_name, result_summary}",
     MultiAgentEvent.TOKEN:              "{text, agent}",
     MultiAgentEvent.ERROR:              "{code, message, agent}",
+    MultiAgentEvent.CANCELLED:          "{turn_id, message}",
 }

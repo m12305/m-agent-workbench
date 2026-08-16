@@ -6,6 +6,9 @@ from typing import Literal, Protocol
 
 
 SessionType = Literal["chat", "multi_agent"]
+MessageRole = Literal["user", "assistant"]
+MessageStatus = Literal["pending", "complete", "failed", "cancelled"]
+TurnStatus = Literal["running", "completed", "failed", "cancelled"]
 
 
 @dataclass
@@ -66,6 +69,71 @@ class SessionRepository(Protocol):
         self, user_id: str, session_type: SessionType,
     ) -> list[Session]: ...
     async def update(self, session_id: str, **kwargs) -> Session | None: ...
+    async def delete(self, session_id: str) -> None: ...
+
+
+# ═══════════════════════════════════════════════════════════════
+# 会话消息与 Multi-Agent 轮次
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class SessionMessage:
+    message_id: str
+    session_id: str
+    turn_id: str
+    role: MessageRole
+    content: str
+    status: MessageStatus = "complete"
+    metadata: dict = field(default_factory=dict)
+    created_at: datetime = field(default_factory=datetime.utcnow)
+
+
+@dataclass
+class MultiAgentTurn:
+    turn_id: str
+    session_id: str
+    user_id: str
+    status: TurnStatus = "running"
+    intent: str = "new_task"
+    resolved_task: str = ""
+    plan: list[dict] = field(default_factory=list)
+    results: dict[str, str] = field(default_factory=dict)
+    step_statuses: dict[str, str] = field(default_factory=dict)
+    sources: list[str] = field(default_factory=list)
+    resume_step: int = 0
+    final_answer: str = ""
+    error_message: str | None = None
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+    completed_at: datetime | None = None
+
+
+@dataclass
+class ConversationSummary:
+    session_id: str
+    summary: str
+    covered_message_count: int = 0
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+
+
+class SessionMessageRepository(Protocol):
+    async def create(self, message: SessionMessage) -> SessionMessage: ...
+    async def list_by_session(self, session_id: str) -> list[SessionMessage]: ...
+    async def count_by_session(self, session_id: str) -> int: ...
+    async def delete_by_session(self, session_id: str) -> None: ...
+
+
+class MultiAgentTurnRepository(Protocol):
+    async def create(self, turn: MultiAgentTurn) -> MultiAgentTurn: ...
+    async def get(self, turn_id: str) -> MultiAgentTurn | None: ...
+    async def list_by_session(self, session_id: str) -> list[MultiAgentTurn]: ...
+    async def update(self, turn_id: str, **kwargs) -> MultiAgentTurn | None: ...
+    async def delete_by_session(self, session_id: str) -> None: ...
+
+
+class ConversationSummaryRepository(Protocol):
+    async def get(self, session_id: str) -> ConversationSummary | None: ...
+    async def upsert(self, summary: ConversationSummary) -> ConversationSummary: ...
     async def delete(self, session_id: str) -> None: ...
 
 
@@ -155,3 +223,31 @@ class TaskRepository(Protocol):
     async def get_many(self, task_ids: list[str]) -> list[TaskRecord]: ...
     async def list_by_document(self, document_id: str) -> list[TaskRecord]: ...
     async def list_incomplete(self) -> list[TaskRecord]: ...
+
+
+# ═══════════════════════════════════════════════════════════════
+# Runtime configuration
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class RuntimeConfigRecord:
+    config_id: str
+    category: str
+    name: str
+    enabled: bool
+    payload: str
+    revision: int = 1
+    status: str = "unconfigured"
+    last_error: str | None = None
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+
+
+class RuntimeConfigRepository(Protocol):
+    async def list_by_category(self, category: str) -> list[RuntimeConfigRecord]: ...
+    async def get(self, config_id: str) -> RuntimeConfigRecord | None: ...
+    async def upsert(self, record: RuntimeConfigRecord) -> RuntimeConfigRecord: ...
+    async def update_status(
+        self, config_id: str, status: str, last_error: str | None = None,
+    ) -> None: ...
+    async def delete(self, config_id: str) -> None: ...

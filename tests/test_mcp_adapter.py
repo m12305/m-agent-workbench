@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import asyncio
 
 import pytest
 from mcp.types import Tool
@@ -122,4 +123,33 @@ async def test_discover_namespaces_and_whitelist(monkeypatch):
 @pytest.mark.asyncio
 async def test_discover_disabled_returns_empty():
     tools, metas = await McpAdapter(McpConfig(enabled=False)).discover()
-    assert tools == [] and metas == []
+    assert tools == [] and metas == {}
+
+
+@pytest.mark.asyncio
+async def test_discover_times_out_and_closes_partial_connection(monkeypatch):
+    class SlowConnection(_FakeMcpConnection):
+        closed = False
+
+        async def connect(self):
+            await asyncio.sleep(1)
+
+        async def close(self):
+            self.__class__.closed = True
+
+    monkeypatch.setattr("src.tools.mcp.adapter.McpConnection", SlowConnection)
+    cfg = McpConfig(enabled=True, servers=[
+        McpServerConfig(
+            name="slow",
+            transport="stdio",
+            command="python",
+            timeout_seconds=0.01,
+        ),
+    ])
+
+    adapter = McpAdapter(cfg)
+    tools, metas = await adapter.discover()
+
+    assert tools == [] and metas == {}
+    assert adapter.server_statuses["slow"]["status"] == "error"
+    assert SlowConnection.closed is True

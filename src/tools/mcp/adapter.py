@@ -77,6 +77,7 @@ class McpAdapter:
     def __init__(self, config: McpConfig):
         self.config = config
         self._connections: list[McpConnection] = []
+        self.server_statuses: dict[str, dict] = {}
 
     async def discover(self) -> tuple[list[BaseTool], dict[str, dict]]:
         if not self.config.enabled:
@@ -84,25 +85,52 @@ class McpAdapter:
         tools: list[BaseTool] = []
         metas: dict[str, dict] = {}
         for server_cfg in self.config.servers:
+            if not server_cfg.enabled:
+                logger.info("MCP '%s' 已禁用，跳过", server_cfg.name)
+                self.server_statuses[server_cfg.name] = {
+                    "status": "disabled", "error": None, "tool_count": 0,
+                }
+                continue
             conn = McpConnection(server_cfg)
             try:
-                await conn.connect()
+                async with asyncio.timeout(server_cfg.timeout_seconds):
+                    await conn.connect()
             except Exception as e:
-                logger.warning("MCP '%s' 连接失败，已跳过: %s", server_cfg.name, e)
+                error_message = str(e) or type(e).__name__
+                logger.warning("MCP '%s' 连接失败，已跳过: %s", server_cfg.name, error_message)
+                self.server_statuses[server_cfg.name] = {
+                    "status": "error", "error": error_message, "tool_count": 0,
+                }
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
                 continue
             self._connections.append(conn)
             try:
-                for t in await conn.list_tools():
+                tool_count = 0
+                async with asyncio.timeout(server_cfg.timeout_seconds):
+                    discovered_tools = await conn.list_tools()
+                for t in discovered_tools:
                     if not _allowed(server_cfg.allowed_tools, t.name):
                         continue
                     tool = to_langchain_tool(conn, t)
                     tools.append(tool)
+                    tool_count += 1
                     metas[tool.name] = {"category": "mcp",
                                         "tags": ["mcp", server_cfg.name],
                                         "version": "1.0.0",
                                         "subagents": server_cfg.subagents}
+                self.server_statuses[server_cfg.name] = {
+                    "status": "connected", "error": None,
+                    "tool_count": tool_count,
+                }
             except Exception as e:
-                logger.warning("MCP '%s' 工具发现失败: %s", server_cfg.name, e)
+                error_message = str(e) or type(e).__name__
+                logger.warning("MCP '%s' 工具发现失败: %s", server_cfg.name, error_message)
+                self.server_statuses[server_cfg.name] = {
+                    "status": "error", "error": error_message, "tool_count": 0,
+                }
         return tools, metas
 
     async def close(self):

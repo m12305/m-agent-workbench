@@ -24,9 +24,20 @@ class ChatService:
     - 传递会话历史到检索服务 (用于 context-aware query 改写)
     """
 
-    def __init__(self, retrieval_service=None):
+    def __init__(
+        self,
+        retrieval_service=None,
+        model_kwargs: dict | None = None,
+        *,
+        store_type: str = "sqlite",
+        sqlite_path: str | None = None,
+    ):
         self._agents: dict[str, ChatAgent] = {}
+        self._retired_agents: list[ChatAgent] = []
         self._retrieval = retrieval_service  # RetrievalService | AdvancedRetrievalService | None
+        self._model_kwargs = dict(model_kwargs or {})
+        self._store_type = store_type
+        self._sqlite_path = sqlite_path
 
     @staticmethod
     def _make_tid(user_id: str, session_id: str) -> str:
@@ -39,11 +50,36 @@ class ChatService:
             agent = ChatAgent(
                 name=f"api-{user_id[:8]}",
                 stream=True,
+                store_type=self._store_type,
+                **(
+                    {"sqlite_path": self._sqlite_path}
+                    if self._store_type == "sqlite" and self._sqlite_path
+                    else {}
+                ),
+                **self._model_kwargs,
             )
             agent.initialize()
             self._agents[user_id] = agent
             logger.info("新 Agent 实例: user=%s", user_id[:8])
         return self._agents[user_id]
+
+    async def reconfigure_model(self, model_kwargs: dict) -> None:
+        """让后续请求使用新模型，已有请求继续持有原 Agent。"""
+        self._model_kwargs = dict(model_kwargs)
+        self._retired_agents.extend(self._agents.values())
+        self._agents = {}
+        logger.info("ChatAgent 模型配置已刷新")
+
+    async def close_all(self) -> None:
+        """关闭当前及已经退役的 Agent。"""
+        agents = [*self._agents.values(), *self._retired_agents]
+        self._agents = {}
+        self._retired_agents = []
+        for agent in agents:
+            try:
+                await agent.aclose()
+            except Exception as exc:
+                logger.warning("关闭 ChatAgent 失败: %s", exc)
 
     @staticmethod
     def _legacy_user_content(content: object) -> str:

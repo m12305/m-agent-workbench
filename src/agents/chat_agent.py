@@ -170,12 +170,19 @@ class ChatAgent(BaseAgent):
         # --- 1. 模型 ---
         provider = kwargs.get("provider", "auto")
         temperature = kwargs.get("temperature", 0.3)
-        model_name = kwargs.get("model_name", None)
+        model_name = kwargs.get("model_name") or kwargs.get("model")
+        model_options = {
+            key: kwargs[key]
+            for key in ("api_key", "base_url", "max_tokens")
+            if kwargs.get(key) is not None
+        }
+        if model_name:
+            model_options["model"] = model_name
 
         self.model = get_model(
             provider=provider,
             temperature=temperature,
-            **(dict(model=model_name) if model_name else {}),
+            **model_options,
         )
 
         # --- 2. 工具 ---
@@ -295,7 +302,7 @@ class ChatAgent(BaseAgent):
 
         # --- 7. 构建 LangGraph ---
         self._graph = None
-        if CAN_RUN and self.model:
+        if self.model:
             self._build_graph()
 
         self.logger.info(
@@ -410,7 +417,7 @@ class ChatAgent(BaseAgent):
         重试机制:
             自动在 API 错误、超时、连接错误时重试 (指数退避 + 随机抖动)
         """
-        if not CAN_RUN or not self.model:
+        if not self.model:
             return self._fallback_response(user_input)
 
         tid = thread_id or self._thread_id
@@ -487,7 +494,7 @@ class ChatAgent(BaseAgent):
 
         tid = thread_id or self._thread_id
 
-        if not CAN_RUN or not self.model:
+        if not self.model:
             fallback = self._fallback_response(user_input)
             yield fallback
             return
@@ -868,7 +875,7 @@ class ChatAgent(BaseAgent):
 
         tid = thread_id or self._thread_id
 
-        if not CAN_RUN or not self.model or not self._graph:
+        if not self.model or not self._graph:
             yield self._fallback_response(user_input)
             return
 

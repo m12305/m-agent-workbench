@@ -11,6 +11,11 @@ import type {
   DocumentUpload,
   Identity,
   IndexTask,
+  LlmConfig,
+  LlmConfigInput,
+  McpConfig,
+  McpConfigInput,
+  ConfigTestResult,
   KnowledgeScope,
   LiveHealth,
   Message,
@@ -218,6 +223,34 @@ export const api = {
     method: 'POST', body: jsonBody({ user_id: userId }),
   }),
   revokeApiKey: (prefix: string) => request<void>(`/api-keys/${encodeURIComponent(prefix)}`, { method: 'DELETE' }),
+
+  getLlmConfig: () => request<LlmConfig>('/admin/config/llm'),
+  saveLlmConfig: (config: LlmConfigInput) => request<LlmConfig>('/admin/config/llm', {
+    method: 'PUT', body: jsonBody(config),
+  }),
+  testLlmConfig: (config: LlmConfigInput) => request<ConfigTestResult>('/admin/config/llm/test', {
+    method: 'POST', body: jsonBody(config),
+  }),
+  listMcpConfigs: () => request<McpConfig[]>('/admin/config/mcp'),
+  createMcpConfig: (config: McpConfigInput) => request<McpConfig>('/admin/config/mcp', {
+    method: 'POST', body: jsonBody(config),
+  }),
+  updateMcpConfig: (id: string, config: McpConfigInput) => request<McpConfig>(
+    `/admin/config/mcp/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: jsonBody(config) },
+  ),
+  setMcpEnabled: (id: string, enabled: boolean) => request<McpConfig>(
+    `/admin/config/mcp/${encodeURIComponent(id)}/enabled`,
+    { method: 'PATCH', body: jsonBody({ enabled }) },
+  ),
+  testMcpConfig: (id: string) => request<ConfigTestResult>(
+    `/admin/config/mcp/${encodeURIComponent(id)}/test`,
+    { method: 'POST' },
+  ),
+  deleteMcpConfig: (id: string) => request<void>(
+    `/admin/config/mcp/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+  ),
 
   listSessions: (sessionType: Session['session_type']) => request<Session[]>(
     `/sessions?session_type=${encodeURIComponent(sessionType)}`,

@@ -4,6 +4,7 @@
     {
       "name": "knowledge",
       "transport": "stdio",
+      "enabled": true,
       "command": "python",
       "args": ["-m", "knowledge_mcp_server"],
       "env": {"KNOWLEDGE_API_KEY": "your-key-here"},
@@ -14,6 +15,7 @@
     {
       "name": "web",
       "transport": "streamable-http",
+      "enabled": true,
       "url": "http://localhost:3000/mcp",
       "headers": {"Authorization": "Bearer your-token-here"},
       "timeout_seconds": 30,

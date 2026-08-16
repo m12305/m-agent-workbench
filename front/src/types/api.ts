@@ -55,9 +55,13 @@ export interface TokenUsage {
 }
 
 export interface Message {
+  message_id?: string | null
+  turn_id?: string | null
   role: 'user' | 'assistant'
   content: string
   created_at: string
+  status?: 'pending' | 'complete' | 'failed' | 'cancelled' | string
+  metadata?: Record<string, unknown>
   citations?: Citation[]
   token_usage?: TokenUsage | null
   state?: 'sending' | 'streaming' | 'complete' | 'error'
@@ -160,4 +164,57 @@ export interface ApiErrorBody {
 export interface StreamEvent {
   event: 'start' | 'token' | 'done' | 'error' | string
   data: Record<string, unknown>
+}
+
+export type LlmProvider = 'openai' | 'deepseek' | 'anthropic'
+
+export interface LlmConfigInput {
+  provider: LlmProvider
+  model_name: string
+  api_key?: string | null
+  base_url?: string | null
+  temperature: number
+  max_tokens?: number | null
+}
+
+export interface LlmConfig extends Omit<LlmConfigInput, 'api_key'> {
+  configured: boolean
+  api_key_configured: boolean
+  api_key_hint: string | null
+  source: string
+  revision: number
+  status: string
+  last_error: string | null
+}
+
+export interface ConfigTestResult {
+  success: boolean
+  message: string
+  tool_count?: number | null
+}
+
+export type McpTransport = 'stdio' | 'streamable-http'
+
+export interface McpConfigInput {
+  name: string
+  transport: McpTransport
+  enabled: boolean
+  command?: string | null
+  args: string[]
+  env: Record<string, string>
+  url?: string | null
+  headers: Record<string, string>
+  timeout_seconds: number
+  allowed_tools: string[]
+  subagents: string[]
+}
+
+export interface McpConfig extends McpConfigInput {
+  config_id: string
+  revision: number
+  status: string
+  last_error: string | null
+  tool_count: number
+  created_at: string
+  updated_at: string
 }

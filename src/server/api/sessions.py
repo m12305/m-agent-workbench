@@ -13,7 +13,7 @@ from ..deps import (
     get_chat_service,
     get_multi_agent_service,
 )
-from ..repositories.base import Identity, Session
+from ..repositories.base import Identity, Session, SessionMessage
 from ..services.session_service import SessionService
 from ..services.chat_service import ChatService
 from ..services.multi_agent_service import (
@@ -99,7 +99,17 @@ async def get_messages(
     messages: list[MessageView] = []
     from langchain_core.messages import HumanMessage, AIMessage
     for msg in stored_messages:
-        if isinstance(msg, HumanMessage):
+        if isinstance(msg, SessionMessage):
+            messages.append(MessageView(
+                role=msg.role,
+                content=msg.content,
+                created_at=msg.created_at,
+                message_id=msg.message_id,
+                turn_id=msg.turn_id,
+                status=msg.status,
+                metadata=msg.metadata,
+            ))
+        elif isinstance(msg, HumanMessage):
             messages.append(MessageView(
                 role="user", content=str(msg.content),
                 created_at=datetime.utcnow(),

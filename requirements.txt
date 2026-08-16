@@ -17,6 +17,7 @@ langchain-deepseek
 python-dotenv>=1.0.0
 pydantic>=2.0.0
 tenacity>=8.0.0
+cryptography>=43.0.0
 
 # ============================================================================
 # FastAPI 服务层

@@ -48,6 +48,68 @@ class MeResponse(BaseModel):
 
 
 # ═══════════════════════════════════════════════════════════════
+# 运行时配置
+# ═══════════════════════════════════════════════════════════════
+
+class LlmConfigRequest(BaseModel):
+    provider: Literal["openai", "deepseek", "anthropic"]
+    model_name: str = Field(min_length=1, max_length=200)
+    api_key: str | None = Field(default=None, max_length=10000)
+    base_url: str | None = Field(default=None, max_length=1000)
+    temperature: float = Field(default=0.3, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
+
+
+class LlmConfigResponse(BaseModel):
+    configured: bool
+    provider: str
+    model_name: str
+    base_url: str | None = None
+    temperature: float
+    max_tokens: int | None = None
+    api_key_configured: bool
+    api_key_hint: str | None = None
+    source: str
+    revision: int
+    status: str
+    last_error: str | None = None
+
+
+class ConfigTestResponse(BaseModel):
+    success: bool
+    message: str
+    tool_count: int | None = None
+
+
+class McpServerConfigRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    transport: Literal["stdio", "streamable-http"]
+    enabled: bool = True
+    command: str | None = Field(default=None, max_length=1000)
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    url: str | None = Field(default=None, max_length=2000)
+    headers: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    allowed_tools: list[str] = Field(default_factory=lambda: ["*"])
+    subagents: list[str] = Field(default_factory=lambda: ["*"])
+
+
+class McpServerConfigResponse(McpServerConfigRequest):
+    config_id: str
+    revision: int
+    status: str
+    last_error: str | None = None
+    tool_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class McpEnabledRequest(BaseModel):
+    enabled: bool
+
+
+# ═══════════════════════════════════════════════════════════════
 # 会话
 # ═══════════════════════════════════════════════════════════════
 
@@ -73,6 +135,10 @@ class MessageView(BaseModel):
     role: Literal["user", "assistant"]
     content: str
     created_at: datetime
+    message_id: str | None = None
+    turn_id: str | None = None
+    status: str = "complete"
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 # ═══════════════════════════════════════════════════════════════

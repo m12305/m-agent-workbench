@@ -55,6 +55,7 @@
     {
       "name": "knowledge",          // 命名空间前缀 → 工具名 knowledge_search
       "transport": "stdio",         // stdio（本地子进程）| streamable-http（远程）
+      "enabled": true,              // 本 server 开关；false 时跳过该 server
       "command": "python",          // stdio 专用：启动命令
       "args": ["-m", "knowledge_mcp_server"],  // stdio 专用：启动参数
       "env": {"KNOWLEDGE_API_KEY": "..."},     // stdio 专用：子进程环境变量
@@ -76,7 +77,8 @@
 
 对应 Pydantic 模型在 [src/tools/mcp/config.py](src/tools/mcp/config.py)：
 
-- `McpServerConfig`：单个 Server（`name` / `transport` / `command` / `args` / `env` / `url` / `headers` / `timeout_seconds` / `allowed_tools` / `subagents`）。
+- `McpServerConfig`：单个 Server（`name` / `transport` / `enabled` / `command` / `args` / `env` / `url` / `headers` / `timeout_seconds` / `allowed_tools` / `subagents`）。
+- `enabled`：本 server 开关（默认 `true`；`false` 时跳过该 server，其余 server 不受影响）。
 - `subagents`：server 级工具分配，声明这个 server 的工具归哪些子 agent 使用（默认 `["*"]` 全部；写 `["general_assistant"]` 则只有该子 agent 能加载）。
 - `McpConfig`：`enabled` + `servers[]`。
 - `load_mcp_config(path)`：读 JSON 文件，**文件缺失或解析失败时返回 `McpConfig(enabled=False)`**（静默降级，不抛异常）。

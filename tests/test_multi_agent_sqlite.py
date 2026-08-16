@@ -144,6 +144,10 @@ class _MainAgentStructuredModel:
     async def ainvoke(self, _messages):
         if self.schema.__name__ == "TaskAnalysisOutput":
             parsed = SimpleNamespace(
+                intent="new_task",
+                resolved_task="delegate one step",
+                referenced_turn_ids=[],
+                reuse_previous_artifacts=False,
                 needs_subagents=True,
                 task_summary="delegate one step",
                 complexity="simple",
@@ -194,6 +198,10 @@ class _RoutingStructuredModel:
     async def ainvoke(self, _messages):
         if self.schema.__name__ == "TaskAnalysisOutput":
             parsed = SimpleNamespace(
+                intent="new_task",
+                resolved_task="route one step",
+                referenced_turn_ids=[],
+                reuse_previous_artifacts=False,
                 needs_subagents=True,
                 task_summary="route one step",
                 complexity="simple",
@@ -266,6 +274,10 @@ class _QueuedStructuredModel:
 
 def _task_analysis_result():
     return TaskAnalysisOutput(
+        intent="new_task",
+        resolved_task="委派任务",
+        referenced_turn_ids=[],
+        reuse_previous_artifacts=False,
         needs_subagents=True,
         task_summary="需要委派任务",
         complexity="simple",
@@ -527,18 +539,18 @@ async def test_service_deletes_multi_agent_session_checkpoint():
         )
     )
     service._agents["user-1"] = fake_agent
-    service._session_locks["user-1:session-1"] = object()
+    service._session_locks["ma:v2:user-1:session-1"] = object()
 
     await service.delete_session_state("user-1", "session-1")
 
-    assert deleted_threads == ["user-1:session-1"]
-    assert "user-1:session-1" not in service._session_locks
+    assert deleted_threads == ["ma:v2:user-1:session-1"]
+    assert "ma:v2:user-1:session-1" not in service._session_locks
 
 
 @pytest.mark.asyncio
 async def test_service_rejects_deleting_active_multi_agent_session():
     service = MultiAgentService()
-    service._active_runs["user-1:session-1"] = asyncio.Event()
+    service._active_runs["ma:v2:user-1:session-1"] = asyncio.Event()
 
     with pytest.raises(MultiAgentSessionBusyError, match="运行中的"):
         await service.delete_session_state("user-1", "session-1")

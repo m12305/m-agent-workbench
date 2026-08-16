@@ -21,10 +21,10 @@ from langchain_core.messages import BaseMessage
 class MainAgentState(TypedDict, total=False):
     """MainAgent LangGraph 状态
 
-    通过 checkpointer 持久化的字段:
-      - messages: 对话历史 (add_messages reducer 自动追加)
+    对话消息由服务层的 SessionMessageRepository 持久化。这里仅保存当前轮
+    的上下文快照和编排状态，避免把分析、计划、工具状态混入用户对话。
 
-    临时字段 (仅当前运行周期):
+    当前运行周期字段:
       - user_task: 原始用户任务
       - needs_subagents: 是否需要多智能体协作
       - plan: 生成的执行计划 (PlanStep 列表)
@@ -34,11 +34,20 @@ class MainAgentState(TypedDict, total=False):
       - iteration_count: 安全计数器
     """
 
-    # ── 对话历史 (checkpointer 管理) ──
-    messages: Annotated[list[BaseMessage], operator.add]
+    # ── 当前对话轮次 ──
+    turn_id: str
+    current_input: str
+    conversation_context: list[dict]
+    conversation_summary: str
+    previous_artifacts: list[dict]
+    resumed_from_turn_id: str
 
     # ── 任务分析 ──
     user_task: str
+    resolved_task: str
+    intent: str
+    referenced_turn_ids: list[str]
+    reuse_previous_artifacts: bool
     needs_subagents: bool
     task_summary: str
 
@@ -55,6 +64,8 @@ class MainAgentState(TypedDict, total=False):
 
     # ── 综合 ──
     synthesized_answer: str
+    synthesis_sources: list[str]
+    synthesis_confidence: str
 
     # ── 安全 ──
     iteration_count: int

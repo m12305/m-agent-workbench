@@ -9,6 +9,7 @@ class McpServerConfig(BaseModel):
     """单个外部 MCP Server 的连接配置。"""
     name: str
     transport: Literal["stdio", "streamable-http"]
+    enabled: bool = True
     command: str | None = None
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)

@@ -17,7 +17,7 @@
 
       <section class="ma-history" aria-labelledby="ma-history-title">
         <header>
-          <h2 id="ma-history-title">历史任务</h2>
+          <h2 id="ma-history-title">历史会话</h2>
           <button type="button" aria-label="刷新历史任务" title="刷新" @click="loadMultiAgentSessions()">
             <ClockCounterClockwise :size="15" aria-hidden="true" />
           </button>
@@ -47,8 +47,8 @@
               class="ma-history-delete"
               type="button"
               :disabled="running || Boolean(loadingSessionId) || deleting"
-              :aria-label="`删除历史任务 ${session.title || '未命名任务'}`"
-              title="删除历史任务"
+              :aria-label="`删除历史会话 ${session.title || '未命名会话'}`"
+              title="删除历史会话"
               @click="sessionToDelete = session"
             >
               <CircleNotch
@@ -98,8 +98,8 @@
     <main class="ma-main">
       <header class="ma-header">
         <div>
-          <h2>协作任务</h2>
-          <p>把复杂目标拆解为可追踪的智能体执行过程</p>
+          <h2>多轮协作</h2>
+          <p>在同一会话中追问、修改任务，或继续中止的执行</p>
         </div>
         <div class="ma-header-actions">
           <button
@@ -147,6 +147,22 @@
         </section>
 
         <template v-else>
+          <section v-if="historicalMessages.length" class="ma-conversation" aria-label="会话记录">
+            <article
+              v-for="message in historicalMessages"
+              :key="message.message_id || `${message.turn_id}-${message.created_at}-${message.role}`"
+              class="ma-conversation-message"
+              :class="`is-${message.role}`"
+            >
+              <span class="ma-conversation-role">{{ message.role === 'user' ? '你' : 'Multi-Agent' }}</span>
+              <p v-if="message.role === 'user'">{{ message.content }}</p>
+              <div v-else class="message-markdown" v-html="renderConversationMessage(message.content)"></div>
+              <small v-if="message.status === 'cancelled'">该轮已中止</small>
+              <small v-else-if="message.status === 'failed'">该轮执行失败</small>
+            </article>
+          </section>
+
+          <template v-if="currentTask || events.length">
           <article class="ma-user-brief">
             <span class="ma-brief-icon"><Stack :size="19" aria-hidden="true" /></span>
             <div>
@@ -254,6 +270,7 @@
               </footer>
             </section>
           </div>
+          </template>
         </template>
       </div>
 
@@ -266,7 +283,7 @@
             v-model="taskInput"
             maxlength="4000"
             rows="2"
-            placeholder="描述任务目标、可用信息和期望结果"
+            :placeholder="activeSessionId ? '继续追问、修改任务，或输入“继续”恢复执行' : '描述任务目标、可用信息和期望结果'"
             :disabled="running"
             @focus="composerFocused = true"
             @blur="composerFocused = false"
@@ -281,7 +298,7 @@
             </button>
             <button v-else class="ma-submit-button" type="submit" :disabled="!taskInput.trim()">
               <PaperPlaneTilt :size="17" weight="bold" aria-hidden="true" />
-              运行
+              发送
             </button>
           </div>
         </form>
@@ -290,8 +307,8 @@
 
     <ConfirmDialog
       :open="Boolean(sessionToDelete)"
-      title="删除这项历史任务？"
-      description="任务记录和对应的多智能体运行状态将被删除，此操作无法撤销。"
+      title="删除这项历史会话？"
+      description="所有对话消息、任务轮次和执行状态都将被删除，此操作无法撤销。"
       :detail="sessionToDelete?.title || '未命名任务'"
       :busy="deleting"
       @cancel="sessionToDelete = null"
@@ -328,7 +345,7 @@ import {
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { api, getSavedApiBase, STORAGE_KEYS } from '../api/client'
-import type { Session } from '../types/api'
+import type { Message, Session } from '../types/api'
 import ConfirmDialog from '../components/feedback/ConfirmDialog.vue'
 
 marked.setOptions({ breaks: true, gfm: true })
@@ -385,6 +402,8 @@ const runStartedAt = ref(0)
 const shouldAutoScroll = ref(true)
 const activeController = ref<AbortController | null>(null)
 const activeSessionId = ref('')
+const activeTurnId = ref('')
+const conversationMessages = ref<Message[]>([])
 const multiAgentSessions = ref<Session[]>([])
 const sessionsLoading = ref(false)
 const sessionsError = ref('')
@@ -394,7 +413,12 @@ const deleting = ref(false)
 let eventSequence = 0
 let copyTimer: number | undefined
 
-const hasRun = computed(() => Boolean(currentTask.value) || events.value.length > 0)
+const hasRun = computed(() => conversationMessages.value.length > 0 || Boolean(currentTask.value) || events.value.length > 0)
+const historicalMessages = computed(() => (
+  activeTurnId.value
+    ? conversationMessages.value.filter((message) => message.turn_id !== activeTurnId.value)
+    : conversationMessages.value
+))
 const errorEvent = computed(() => [...events.value].reverse().find((event) => event.type === 'error'))
 const errorMessage = computed(() => dataString(errorEvent.value, 'message') || '')
 const cancelledEvent = computed(() => [...events.value].reverse().find((event) => event.type === 'cancelled'))
@@ -415,7 +439,9 @@ const statusLabel = computed(() => ({
   ready: '就绪',
 })[runState.value])
 
-const traceEvents = computed(() => events.value.filter((event) => !['start', 'token', 'done'].includes(event.type)))
+const traceEvents = computed(() => events.value.filter(
+  (event) => !['start', 'turn_started', 'token', 'done'].includes(event.type),
+))
 
 const answerText = computed(() => {
   const synthesis = [...events.value].reverse().find((event) => event.type === 'synthesis_done')
@@ -651,20 +677,30 @@ function resetRun() {
   events.value = []
   currentTask.value = ''
   activeSessionId.value = ''
+  activeTurnId.value = ''
+  conversationMessages.value = []
   shouldAutoScroll.value = true
   nextTick(() => composerInput.value?.focus())
 }
 
-function stopRun() {
+async function stopRun() {
   const sessionId = activeSessionId.value
   if (sessionId) {
     const headers = new Headers()
     const apiKey = localStorage.getItem(STORAGE_KEYS.apiKey)
     if (apiKey) headers.set('Authorization', `Bearer ${apiKey}`)
-    void fetch(
-      `${getSavedApiBase()}/multi-agent/chat/${encodeURIComponent(sessionId)}/cancel`,
-      { method: 'POST', headers },
-    ).catch(() => undefined)
+    try {
+      const response = await fetch(
+        `${getSavedApiBase()}/multi-agent/chat/${encodeURIComponent(sessionId)}/cancel`,
+        { method: 'POST', headers },
+      )
+      if (response.ok) {
+        const result = await response.json() as { cancelled?: boolean }
+        if (result.cancelled) return
+      }
+    } catch {
+      // 无法送达协作式中止时，再终止本地流连接。
+    }
   }
   activeController.value?.abort()
 }
@@ -698,15 +734,11 @@ async function loadHistoricalSession(session: Session) {
   loadingSessionId.value = session.session_id
   activeSessionId.value = session.session_id
   events.value = []
-  currentTask.value = session.title || '未命名任务'
+  activeTurnId.value = ''
+  currentTask.value = ''
   runStartedAt.value = new Date(session.created_at).getTime() || Date.now()
   try {
-    const messages = await api.getMessages(session.session_id)
-    const userMessage = messages.find((message) => message.role === 'user')
-    const answer = [...messages].reverse().find((message) => message.role === 'assistant')
-    currentTask.value = userMessage?.content || currentTask.value
-    if (answer?.content) pushEvent('synthesis_done', { answer: answer.content })
-    pushEvent('done', { session_id: session.session_id })
+    conversationMessages.value = await api.getMessages(session.session_id)
     scrollToBottom(true)
   } catch (error) {
     pushEvent('error', {
@@ -755,7 +787,7 @@ async function submitTask() {
   currentTask.value = query
   taskInput.value = ''
   events.value = []
-  activeSessionId.value = ''
+  activeTurnId.value = ''
   runStartedAt.value = Date.now()
   shouldAutoScroll.value = true
   copied.value = false
@@ -772,7 +804,10 @@ async function submitTask() {
     const response = await fetch(`${getSavedApiBase()}/multi-agent/chat/stream`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({
+        query,
+        session_id: activeSessionId.value || null,
+      }),
       signal: controller.signal,
     })
 
@@ -811,6 +846,11 @@ async function submitTask() {
             ? parsed.data.session_id
             : ''
         }
+        if (parsed.type === 'turn_started') {
+          activeTurnId.value = typeof parsed.data.turn_id === 'string'
+            ? parsed.data.turn_id
+            : ''
+        }
         if (parsed.type === 'done' || parsed.type === 'error') {
           terminalEventReceived = true
           break
@@ -829,6 +869,11 @@ async function submitTask() {
             ? parsed.data.session_id
             : ''
         }
+        if (parsed.type === 'turn_started') {
+          activeTurnId.value = typeof parsed.data.turn_id === 'string'
+            ? parsed.data.turn_id
+            : ''
+        }
         terminalEventReceived = parsed.type === 'done' || parsed.type === 'error'
       }
     }
@@ -844,9 +889,20 @@ async function submitTask() {
   } finally {
     if (activeController.value === controller) activeController.value = null
     running.value = false
+    if (activeSessionId.value) {
+      try {
+        conversationMessages.value = await api.getMessages(activeSessionId.value)
+      } catch {
+        // SSE 结果仍可展示，下次加载会话时再同步历史。
+      }
+    }
     await loadMultiAgentSessions(false)
     scrollToBottom()
   }
+}
+
+function renderConversationMessage(content: string): string {
+  return DOMPurify.sanitize(marked.parse(content) as string)
 }
 
 onMounted(() => {
@@ -1120,6 +1176,35 @@ onBeforeUnmount(() => {
 .ma-prompt-starters strong { color: var(--text); font-size: 0.8rem; }
 .ma-prompt-starters small { color: var(--text-muted); font-size: 0.67rem; line-height: 1.5; }
 .ma-prompt-starters svg { flex: 0 0 auto; color: var(--accent); }
+
+.ma-conversation {
+  width: min(100%, 920px);
+  margin: 0 auto 24px;
+  display: grid;
+  gap: 14px;
+}
+
+.ma-conversation-message {
+  width: min(82%, 760px);
+  padding: 14px 16px;
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.ma-conversation-message.is-user {
+  justify-self: end;
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--line));
+  background: var(--accent-soft);
+}
+
+.ma-conversation-message.is-assistant { justify-self: start; }
+.ma-conversation-role { color: var(--text-muted); font-size: 0.61rem; font-weight: 750; }
+.ma-conversation-message > p { color: var(--text); font-size: 0.79rem; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ma-conversation-message > small { color: var(--warning); font-size: 0.62rem; font-weight: 680; }
 
 .ma-user-brief {
   width: min(100%, 1180px);

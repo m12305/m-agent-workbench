@@ -20,7 +20,8 @@ import aiosqlite
 
 from .base import (
     User, ApiKey, Session, SessionType, Identity,
-    Document, ChunkRecord, TaskRecord,
+    Document, ChunkRecord, TaskRecord, RuntimeConfigRecord,
+    SessionMessage, MultiAgentTurn, ConversationSummary,
 )
 
 logger = logging.getLogger("server.sqlite_repos")
@@ -277,6 +278,54 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_messages (
+    message_id   TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL,
+    turn_id      TEXT NOT NULL,
+    role         TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+    content      TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'complete'
+                 CHECK(status IN ('pending', 'complete', 'failed', 'cancelled')),
+    metadata     TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_messages_session_created
+ON session_messages(session_id, created_at, message_id);
+
+CREATE TABLE IF NOT EXISTS multi_agent_turns (
+    turn_id        TEXT PRIMARY KEY,
+    session_id     TEXT NOT NULL,
+    user_id        TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'running'
+                   CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
+    intent         TEXT NOT NULL DEFAULT 'new_task',
+    resolved_task  TEXT NOT NULL DEFAULT '',
+    plan            TEXT NOT NULL DEFAULT '[]',
+    results         TEXT NOT NULL DEFAULT '{}',
+    step_statuses   TEXT NOT NULL DEFAULT '{}',
+    sources          TEXT NOT NULL DEFAULT '[]',
+    resume_step      INTEGER NOT NULL DEFAULT 0,
+    final_answer     TEXT NOT NULL DEFAULT '',
+    error_message    TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    completed_at     TEXT,
+    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_multi_agent_turns_session_created
+ON multi_agent_turns(session_id, created_at, turn_id);
+
+CREATE TABLE IF NOT EXISTS conversation_summaries (
+    session_id             TEXT PRIMARY KEY,
+    summary                TEXT NOT NULL DEFAULT '',
+    covered_message_count  INTEGER NOT NULL DEFAULT 0,
+    updated_at             TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS documents (
     document_id   TEXT PRIMARY KEY,
     user_id       TEXT NOT NULL,
@@ -324,6 +373,23 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_document ON tasks(document_id);
+
+CREATE TABLE IF NOT EXISTS runtime_configs (
+    config_id    TEXT PRIMARY KEY,
+    category     TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    payload      TEXT NOT NULL,
+    revision     INTEGER NOT NULL DEFAULT 1,
+    status       TEXT NOT NULL DEFAULT 'unconfigured',
+    last_error   TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    UNIQUE(category, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_configs_category
+ON runtime_configs(category, name);
 """
 
 
@@ -586,6 +652,191 @@ class SqliteSessionRepo:
     async def delete(self, session_id: str) -> None:
         await self._db.execute(
             "DELETE FROM sessions WHERE session_id = ?", (session_id,))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SqliteSessionMessageRepo / SqliteMultiAgentTurnRepo
+# ═══════════════════════════════════════════════════════════════════
+
+class SqliteSessionMessageRepo:
+    def __init__(self, db: SqliteDb):
+        self._db = db
+
+    async def create(self, message: SessionMessage) -> SessionMessage:
+        await self._db.execute(
+            "INSERT INTO session_messages "
+            "(message_id, session_id, turn_id, role, content, status, metadata, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                message.message_id,
+                message.session_id,
+                message.turn_id,
+                message.role,
+                message.content,
+                message.status,
+                _json_dict(message.metadata),
+                message.created_at.isoformat(),
+            ),
+        )
+        return message
+
+    async def list_by_session(self, session_id: str) -> list[SessionMessage]:
+        rows = await self._db.fetchall(
+            "SELECT * FROM session_messages WHERE session_id = ? "
+            "ORDER BY created_at, rowid",
+            (session_id,),
+        )
+        return [self._row_to_message(row) for row in rows]
+
+    async def count_by_session(self, session_id: str) -> int:
+        return int(await self._db.fetchval(
+            "SELECT COUNT(*) FROM session_messages WHERE session_id = ?",
+            (session_id,),
+        ) or 0)
+
+    async def delete_by_session(self, session_id: str) -> None:
+        await self._db.execute(
+            "DELETE FROM session_messages WHERE session_id = ?", (session_id,),
+        )
+
+    @staticmethod
+    def _row_to_message(row: dict) -> SessionMessage:
+        return SessionMessage(
+            message_id=row["message_id"],
+            session_id=row["session_id"],
+            turn_id=row["turn_id"],
+            role=row["role"],
+            content=row["content"],
+            status=row["status"],
+            metadata=_parse_json_dict(row["metadata"]),
+            created_at=_parse_dt(row["created_at"]),
+        )
+
+
+class SqliteMultiAgentTurnRepo:
+    _UPDATABLE = {
+        "status", "intent", "resolved_task", "plan", "results",
+        "step_statuses", "sources", "resume_step", "final_answer",
+        "error_message", "completed_at",
+    }
+    _JSON_FIELDS = {"plan", "results", "step_statuses", "sources"}
+
+    def __init__(self, db: SqliteDb):
+        self._db = db
+
+    async def create(self, turn: MultiAgentTurn) -> MultiAgentTurn:
+        await self._db.execute(
+            "INSERT INTO multi_agent_turns "
+            "(turn_id, session_id, user_id, status, intent, resolved_task, "
+            "plan, results, step_statuses, sources, resume_step, final_answer, "
+            "error_message, created_at, updated_at, completed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                turn.turn_id, turn.session_id, turn.user_id, turn.status,
+                turn.intent, turn.resolved_task, _json_list(turn.plan),
+                _json_dict(turn.results), _json_dict(turn.step_statuses),
+                _json_list(turn.sources), turn.resume_step, turn.final_answer,
+                turn.error_message, turn.created_at.isoformat(),
+                turn.updated_at.isoformat(),
+                turn.completed_at.isoformat() if turn.completed_at else None,
+            ),
+        )
+        return turn
+
+    async def get(self, turn_id: str) -> MultiAgentTurn | None:
+        row = await self._db.fetchone(
+            "SELECT * FROM multi_agent_turns WHERE turn_id = ?", (turn_id,),
+        )
+        return self._row_to_turn(row) if row else None
+
+    async def list_by_session(self, session_id: str) -> list[MultiAgentTurn]:
+        rows = await self._db.fetchall(
+            "SELECT * FROM multi_agent_turns WHERE session_id = ? "
+            "ORDER BY created_at, rowid",
+            (session_id,),
+        )
+        return [self._row_to_turn(row) for row in rows]
+
+    async def update(self, turn_id: str, **kwargs) -> MultiAgentTurn | None:
+        updates = {key: value for key, value in kwargs.items() if key in self._UPDATABLE}
+        if not updates:
+            return await self.get(turn_id)
+        encoded = {}
+        for key, value in updates.items():
+            if key in self._JSON_FIELDS:
+                encoded[key] = json.dumps(value, ensure_ascii=False)
+            elif key == "completed_at" and isinstance(value, datetime):
+                encoded[key] = value.isoformat()
+            else:
+                encoded[key] = value
+        clauses = [f"{key} = ?" for key in encoded]
+        values = [*encoded.values(), _now(), turn_id]
+        await self._db.execute(
+            f"UPDATE multi_agent_turns SET {', '.join(clauses)}, updated_at = ? "
+            "WHERE turn_id = ?",
+            tuple(values),
+        )
+        return await self.get(turn_id)
+
+    async def delete_by_session(self, session_id: str) -> None:
+        await self._db.execute(
+            "DELETE FROM multi_agent_turns WHERE session_id = ?", (session_id,),
+        )
+
+    @staticmethod
+    def _row_to_turn(row: dict) -> MultiAgentTurn:
+        return MultiAgentTurn(
+            turn_id=row["turn_id"], session_id=row["session_id"],
+            user_id=row["user_id"], status=row["status"], intent=row["intent"],
+            resolved_task=row["resolved_task"], plan=_parse_json_list(row["plan"]),
+            results=_parse_json_dict(row["results"]),
+            step_statuses=_parse_json_dict(row["step_statuses"]),
+            sources=_parse_json_list(row["sources"]),
+            resume_step=int(row["resume_step"]), final_answer=row["final_answer"],
+            error_message=row["error_message"], created_at=_parse_dt(row["created_at"]),
+            updated_at=_parse_dt(row["updated_at"]),
+            completed_at=_parse_dt(row["completed_at"]) if row["completed_at"] else None,
+        )
+
+
+class SqliteConversationSummaryRepo:
+    def __init__(self, db: SqliteDb):
+        self._db = db
+
+    async def get(self, session_id: str) -> ConversationSummary | None:
+        row = await self._db.fetchone(
+            "SELECT * FROM conversation_summaries WHERE session_id = ?",
+            (session_id,),
+        )
+        if not row:
+            return None
+        return ConversationSummary(
+            session_id=row["session_id"], summary=row["summary"],
+            covered_message_count=int(row["covered_message_count"]),
+            updated_at=_parse_dt(row["updated_at"]),
+        )
+
+    async def upsert(self, summary: ConversationSummary) -> ConversationSummary:
+        now = _now()
+        await self._db.execute(
+            "INSERT INTO conversation_summaries "
+            "(session_id, summary, covered_message_count, updated_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET "
+            "summary = excluded.summary, "
+            "covered_message_count = excluded.covered_message_count, "
+            "updated_at = excluded.updated_at",
+            (summary.session_id, summary.summary, summary.covered_message_count, now),
+        )
+        return ConversationSummary(
+            session_id=summary.session_id, summary=summary.summary,
+            covered_message_count=summary.covered_message_count,
+            updated_at=_parse_dt(now),
+        )
+
+    async def delete(self, session_id: str) -> None:
+        await self._db.execute(
+            "DELETE FROM conversation_summaries WHERE session_id = ?", (session_id,),
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -945,3 +1196,89 @@ class SqliteTaskRepo:
             )
             for r in rows
         ]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SqliteRuntimeConfigRepo
+# ═══════════════════════════════════════════════════════════════════
+
+class SqliteRuntimeConfigRepo:
+    """通用运行时配置仓库，payload 由服务层加密后写入。"""
+
+    def __init__(self, db: SqliteDb):
+        self._db = db
+
+    async def list_by_category(self, category: str) -> list[RuntimeConfigRecord]:
+        rows = await self._db.fetchall(
+            "SELECT * FROM runtime_configs WHERE category = ? "
+            "ORDER BY name COLLATE NOCASE, config_id",
+            (category,),
+        )
+        return [self._row_to_record(row) for row in rows]
+
+    async def get(self, config_id: str) -> RuntimeConfigRecord | None:
+        row = await self._db.fetchone(
+            "SELECT * FROM runtime_configs WHERE config_id = ?",
+            (config_id,),
+        )
+        return self._row_to_record(row) if row else None
+
+    async def upsert(self, record: RuntimeConfigRecord) -> RuntimeConfigRecord:
+        now = _now()
+        await self._db.execute(
+            "INSERT INTO runtime_configs "
+            "(config_id, category, name, enabled, payload, revision, status, "
+            "last_error, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?) "
+            "ON CONFLICT(config_id) DO UPDATE SET "
+            "category = excluded.category, name = excluded.name, "
+            "enabled = excluded.enabled, payload = excluded.payload, "
+            "revision = runtime_configs.revision + 1, "
+            "status = excluded.status, last_error = excluded.last_error, "
+            "updated_at = excluded.updated_at",
+            (
+                record.config_id,
+                record.category,
+                record.name,
+                int(record.enabled),
+                record.payload,
+                record.status,
+                record.last_error,
+                record.created_at.isoformat(),
+                now,
+            ),
+        )
+        stored = await self.get(record.config_id)
+        if stored is None:
+            raise RuntimeError(f"运行时配置写入失败: {record.config_id}")
+        return stored
+
+    async def update_status(
+        self, config_id: str, status: str, last_error: str | None = None,
+    ) -> None:
+        await self._db.execute(
+            "UPDATE runtime_configs SET status = ?, last_error = ?, "
+            "updated_at = ? WHERE config_id = ?",
+            (status, last_error, _now(), config_id),
+        )
+
+    async def delete(self, config_id: str) -> None:
+        await self._db.execute(
+            "DELETE FROM runtime_configs WHERE config_id = ?",
+            (config_id,),
+        )
+
+    @staticmethod
+    def _row_to_record(row: dict) -> RuntimeConfigRecord:
+        return RuntimeConfigRecord(
+            config_id=row["config_id"],
+            category=row["category"],
+            name=row["name"],
+            enabled=bool(row["enabled"]),
+            payload=row["payload"],
+            revision=int(row["revision"]),
+            status=row["status"],
+            last_error=row["last_error"],
+            created_at=_parse_dt(row["created_at"]),
+            updated_at=_parse_dt(row["updated_at"]),
+        )

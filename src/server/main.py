@@ -20,13 +20,21 @@ from .middleware import LoggingMiddleware, AuthMiddleware, setup_cors
 from .services import AuthService, SessionService, ChatService
 from ..rag.retrieval import RetrievalService
 from .services.multi_agent_service import MultiAgentService
+from .services.runtime_config_service import RuntimeConfigService
+from .services.secret_cipher import SecretCipher
 from ..tools.mcp import load_mcp_config, McpAdapter
 from .repositories import (
     InMemoryUserRepo, InMemoryApiKeyRepo, InMemorySessionRepo,
     InMemoryDocumentRepo, InMemoryChunkRepo, InMemoryTaskRepo,
+    InMemoryRuntimeConfigRepo,
+    InMemorySessionMessageRepo, InMemoryMultiAgentTurnRepo,
+    InMemoryConversationSummaryRepo,
     SqliteDb,
     SqliteUserRepo, SqliteApiKeyRepo, SqliteSessionRepo,
     SqliteDocumentRepo, SqliteChunkRepo, SqliteTaskRepo,
+    SqliteRuntimeConfigRepo,
+    SqliteSessionMessageRepo, SqliteMultiAgentTurnRepo,
+    SqliteConversationSummaryRepo,
 )
 from ..rag.storage import create_storage
 from ..rag.parsing import (
@@ -96,6 +104,10 @@ async def lifespan(app: FastAPI):
         doc_repo = SqliteDocumentRepo(sqlite_db)
         chunk_repo = SqliteChunkRepo(sqlite_db)
         task_repo = SqliteTaskRepo(sqlite_db)
+        runtime_config_repo = SqliteRuntimeConfigRepo(sqlite_db)
+        session_message_repo = SqliteSessionMessageRepo(sqlite_db)
+        multi_agent_turn_repo = SqliteMultiAgentTurnRepo(sqlite_db)
+        conversation_summary_repo = SqliteConversationSummaryRepo(sqlite_db)
         logger.info("存储后端: SQLite → %s", sqlite_db.db_path)
     else:
         user_repo = InMemoryUserRepo()
@@ -104,6 +116,10 @@ async def lifespan(app: FastAPI):
         doc_repo = InMemoryDocumentRepo()
         chunk_repo = InMemoryChunkRepo()
         task_repo = InMemoryTaskRepo()
+        runtime_config_repo = InMemoryRuntimeConfigRepo()
+        session_message_repo = InMemorySessionMessageRepo()
+        multi_agent_turn_repo = InMemoryMultiAgentTurnRepo()
+        conversation_summary_repo = InMemoryConversationSummaryRepo()
         logger.info("存储后端: 内存 (REPOSITORY_BACKEND=memory)")
 
     # ── Auth ──
@@ -113,6 +129,22 @@ async def lifespan(app: FastAPI):
     )
 
     session_service = SessionService(session_repo=session_repo)
+
+    # ── 可热切换的运行时配置 ──
+    storage_sqlite_dir = os.getenv(
+        "STORAGE_SQLITE_DIR", os.path.join(os.getcwd(), "data")
+    )
+    runtime_config_service = RuntimeConfigService(
+        repository=runtime_config_repo,
+        cipher=(
+            SecretCipher.from_environment(storage_sqlite_dir)
+            if repo_backend == "sqlite"
+            else SecretCipher.ephemeral()
+        ),
+        mcp_adapter_factory=McpAdapter,
+    )
+    mcp_cfg = load_mcp_config(os.getenv("MCP_CONFIG_PATH", "./mcp.json"))
+    await runtime_config_service.initialize(mcp_cfg)
 
     # ── Embedding (百炼) ──
     embedding = None
@@ -155,10 +187,11 @@ async def lifespan(app: FastAPI):
         rewrite_model = os.getenv("REWRITE_MODEL", "")
         if rewrite_model:
             try:
-                from ..models import get_model, CAN_RUN
-                if CAN_RUN:
+                from ..models import get_model
+                rewrite_model_kwargs = runtime_config_service.model_config
+                if rewrite_model_kwargs:
                     rewrite_llm = get_model(
-                        temperature=0.1,
+                        **{**rewrite_model_kwargs, "temperature": 0.1},
                     )
                     logger.info("Query 改写 LLM 已就绪")
             except Exception as e:
@@ -171,26 +204,32 @@ async def lifespan(app: FastAPI):
             logger.info("高阶检索服务已启用 (Query 改写 + 多路检索 + RRF 合并)")
 
     # ── Chat (注入检索) ──
-    chat_service = ChatService(retrieval_service=retrieval)
-
-    # ── MCP 工具 (默认关闭，连接失败不阻断) ──
-    mcp_cfg = load_mcp_config(os.getenv("MCP_CONFIG_PATH", "./mcp.json"))
-    mcp_adapter = McpAdapter(mcp_cfg)
-    mcp_tools, mcp_tools_meta = await mcp_adapter.discover()
-    logger.info("MCP 工具: enabled=%s, tools=%d", mcp_cfg.enabled, len(mcp_tools))
+    chat_service = ChatService(
+        retrieval_service=retrieval,
+        model_kwargs=runtime_config_service.model_config,
+        store_type=repo_backend,
+        sqlite_path=(
+            os.path.join(storage_sqlite_dir, "chat_agent.db")
+            if repo_backend == "sqlite"
+            else None
+        ),
+    )
 
     # ── Multi-Agent (Plan-and-Solve 多智能体编排) ──
-    from ..agents.multi_agent import create_default_registry
-
-    sub_agent_registry = create_default_registry(
-        mcp_tools=mcp_tools, mcp_tools_meta=mcp_tools_meta,
-    )
-    storage_sqlite_dir = os.getenv("STORAGE_SQLITE_DIR", os.path.join(os.getcwd(), "data"))
+    sub_agent_registry = runtime_config_service.registry
     multi_agent_service = MultiAgentService(
         sub_agent_registry=sub_agent_registry,
         store_type=repo_backend,
         sqlite_path=os.path.join(storage_sqlite_dir, "multi_agent.db") if repo_backend == "sqlite" else None,
+        model_kwargs=runtime_config_service.model_config,
+        message_repo=session_message_repo,
+        turn_repo=multi_agent_turn_repo,
+        summary_repo=conversation_summary_repo,
+        session_service=session_service,
+        max_context_tokens=int(os.getenv("MULTI_AGENT_CONTEXT_MAX_TOKENS", "6000")),
+        max_history_turns=int(os.getenv("MULTI_AGENT_MAX_HISTORY_TURNS", "10")),
     )
+    runtime_config_service.bind_services(chat_service, multi_agent_service)
     logger.info("Multi-Agent 服务已启用 (subagents=%d)", sub_agent_registry.count)
 
     # ── 文档管理 ──
@@ -284,7 +323,8 @@ async def lifespan(app: FastAPI):
     app.state.embedding = embedding
     app.state.milvus = milvus
     app.state.multi_agent_service = multi_agent_service
-    app.state.mcp_tools = mcp_tools
+    app.state.runtime_config_service = runtime_config_service
+    app.state.mcp_tools = runtime_config_service.mcp_tools
     app.state.sqlite_db = sqlite_db
 
     logger.info("🚀 FastAPI 服务已启动 (auth=persistent, "
@@ -306,8 +346,9 @@ async def lifespan(app: FastAPI):
             milvus.disconnect()
         if multi_agent_service:
             await multi_agent_service.close_all()
-        if mcp_adapter:
-            await mcp_adapter.close()
+        if chat_service:
+            await chat_service.close_all()
+        await runtime_config_service.close()
         if sqlite_db:
             await sqlite_db.close()
         logger.info("🛑 FastAPI 服务已关闭")
