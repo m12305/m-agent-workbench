@@ -2,13 +2,16 @@
 
 面向多 Agent 应用的统一工作台。
 
-`m-agent-workbench` 基于 FastAPI 与 Vue 3 构建，为 Agent 应用提供统一入口，并集中管理身份认证、成员权限、会话、知识库和运行状态。当前内置 Chat Agent 与 RAG 知识库，后续 Agent 可以复用同一套工作台基础能力持续接入。
+`m-agent-workbench` 基于 FastAPI 与 Vue 3 构建，为 Agent 应用提供统一入口，并集中管理身份认证、成员权限、会话、知识库和运行状态。当前内置 Chat Agent、多智能体（Plan-and-Solve 编排）与 RAG 知识库，后续 Agent 可以复用同一套工作台基础能力持续接入。
 
 ## 核心能力
 
 - **Agent 应用中心**：从统一入口访问不同 Agent，当前提供 Chat Agent 与多智能体（Plan-and-Solve 编排）。
 - **流式智能对话**：支持 SSE 流式回答、多轮会话和会话历史。
 - **多智能体编排**：MainAgent 负责任务分析、计划制定与调度，多个 SubAgent 分工执行并综合结果。
+- **多轮协作与断点续跑**：同一会话内可追问、修改任务，或「继续」中止的编排执行，历史对话经摘要压缩进入上下文。
+- **运行时配置中心**：在 WebUI 中动态切换 LLM 模型与外部 MCP 服务，保存后新请求立即生效，无需重启（密钥加密落库）。
+- **MCP 外部工具集成**：连接 stdio / streamable-http 外部 MCP Server，自动发现工具并按 `subagents` 字段注入指定子智能体。
 - **RAG 知识库**：支持文档解析、向量索引，以及私有、共享、混合范围检索。
 - **成员与密钥管理**：使用数据库持久化用户和 API Key，并按管理员、成员角色控制权限。
 - **可扩展工作台**：前端通过 Agent 注册表展示应用，后端提供 Agent 基类、工具注册与服务层，便于继续接入新 Agent。
@@ -36,8 +39,9 @@ m-agent-workbench/
 │   ├── agents/                    # Agent 层：BaseAgent / ChatAgent
 │   │   └── multi_agent/           # 多智能体：MainAgent 编排 + SubAgent + 注册中心
 │   ├── tools/                     # Agent 工具基类与注册表
-│   │   ├── backend_api/           # 后端 API 工具（遥感等）
+│   │   ├── backend_api/           # 后端 API 工具（遥感、Tavily 搜索）
 │   │   ├── general/               # 通用工具
+│   │   ├── mcp/                   # MCP 适配（配置 / 传输 / 连接 / 发现 / 转换）
 │   │   ├── single_agent_planning/ # 单智能体规划工具
 │   │   └── multi_agent_planning/  # 多智能体规划工具
 │   ├── models/                    # LLM 适配
@@ -56,15 +60,16 @@ m-agent-workbench/
 │   │   └── retrieval/             # 检索服务（基础 + 高级检索）
 │   └── server/                    # FastAPI 工作台后端
 │       ├── main.py                # 应用初始化与生命周期
-│       ├── api/                   # 认证、用户、会话、Chat 与 Multi-Agent API
-│       ├── repositories/          # SQLite / Memory 存储实现
-│       ├── services/              # 认证、会话、对话与多智能体编排
+│       ├── api/                   # 认证、用户、会话、Chat、Multi-Agent、运行时配置 API
+│       ├── repositories/          # SQLite / Memory 存储实现（含运行时配置、消息、轮次、摘要）
+│       ├── services/              # 认证、会话、对话、多智能体编排、运行时配置、密钥加密
 │       ├── middleware/            # 中间件
+│       ├── bootstrap_admin.py     # 初始化首位管理员
 │       └── exceptions.py          # 统一异常
 │
 ├── front/                         # Vue 3 前端
 │   ├── src/constants/agents.ts    # Agent 应用注册表
-│   ├── src/views/                 # 应用中心、对话、知识库、管理与系统页面
+│   ├── src/views/                 # 应用中心、对话、知识库、管理、系统与配置中心页面
 │   ├── src/components/            # 布局、对话与反馈组件
 │   ├── src/stores/app.ts          # Pinia 全局状态
 │   ├── src/api/client.ts          # 后端 API 客户端
@@ -72,6 +77,7 @@ m-agent-workbench/
 │
 ├── webui/index.html               # 单文件测试控制台 (纯 HTML/JS)
 ├── .env.example                   # 环境变量模板
+├── mcp.json.example               # MCP 服务配置模板（启动种子，运行期以 WebUI 为准）
 ├── requirements.txt               # Python 依赖
 ├── Dockerfile.backend             # FastAPI 后端镜像
 ├── Dockerfile.nginx               # 多阶段构建: Vue 编译 → Nginx
@@ -108,6 +114,8 @@ BAILIAN_API_KEY=sk-your-key
 # Milvus (可选, 无则不建索引)
 MILVUS_HOST=localhost
 ```
+
+> LLM 模型与 MCP 服务启动后可在 WebUI「配置中心」动态修改，无需重启；`.env` / `mcp.json` 仅作首次启动的种子。
 
 ### 3. 初始化首位管理员（仅全新数据库）
 
@@ -250,9 +258,26 @@ sudo docker compose up -d --build     # 更新后重新构建
 
 请求体: `{ "query", "session_id" }`（`session_id` 不传则自动创建新会话）。
 
-事件类型: `start` / `analyzing` / `analysis_done` / `plan_created` / `dispatching` /
-`subagent_start` / `subagent_plan` / `subagent_step` / `subagent_progress` / `subagent_done` /
-`synthesizing` / `synthesis_done` / `tool_call` / `token` / `error` / `done`
+事件类型: `start` / `turn_started` / `status` / `analyzing` / `analysis_done` / `plan_created` /
+`dispatching` / `subagent_start` / `subagent_plan` / `subagent_step` / `subagent_progress` /
+`subagent_done` / `synthesizing` / `synthesis_done` / `tool_call` / `tool_result` / `token` /
+`error` / `cancelled` / `done`
+
+### 运行时配置（admin）
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/admin/config/llm` | 当前模型配置（密钥脱敏） |
+| `PUT` | `/api/v1/admin/config/llm` | 保存并应用模型配置（热切换） |
+| `POST` | `/api/v1/admin/config/llm/test` | 测试模型连接 |
+| `GET` | `/api/v1/admin/config/mcp` | MCP 服务列表 |
+| `POST` | `/api/v1/admin/config/mcp` | 新增 MCP 服务 |
+| `PUT` | `/api/v1/admin/config/mcp/{id}` | 更新 MCP 服务 |
+| `PATCH` | `/api/v1/admin/config/mcp/{id}/enabled` | 启停 MCP 服务 |
+| `POST` | `/api/v1/admin/config/mcp/{id}/test` | 测试 MCP 连接 |
+| `DELETE` | `/api/v1/admin/config/mcp/{id}` | 删除 MCP 服务 |
+
+以上端点均需管理员权限；保存后新请求立即使用最新配置，无需重启。
 
 ### 文档
 
@@ -291,6 +316,17 @@ sudo docker compose up -d --build     # 更新后重新构建
 3. 在 `front/src/constants/agents.ts` 注册应用信息与路由，使新 Agent 出现在应用中心。
 
 前端注册表负责应用入口展示；新 Agent 的后端接口与业务逻辑仍需显式实现，避免工作台展示尚不可用的能力。
+
+### 运行时配置与 MCP
+
+LLM 模型与 MCP 服务为运行时可配置项，由 `RuntimeConfigService` 统一管理：
+
+- 配置持久化到数据库并以 Fernet 加密（`CONFIG_ENCRYPTION_KEY`），读取接口脱敏。
+- 首次启动从 `.env` / `mcp.json` 种子；之后以 WebUI「配置中心」为准。
+- 修改保存后热更新：重建 Agent 与工具 Registry，新请求立即生效，旧实例退役后异步关闭。
+- MCP 支持 stdio（本地子进程）与 streamable-http（远程），工具按 `subagents` 字段注入子智能体。
+
+完整链路见 [docs/multi-agent-request-flow.md](docs/multi-agent-request-flow.md) 与 [docs/mcp-tool-discovery-flow.md](docs/mcp-tool-discovery-flow.md)。
 
 ### 用户数据隔离
 
@@ -339,11 +375,16 @@ Chunk、文档状态和任务状态由 `aiosqlite` 在固定连接上一次提�
 
 | 分类 | 环境变量 | 说明 |
 |------|----------|------|
+| LLM | `LLM_PROVIDER` / `LLM_MODEL` / `LLM_BASE_URL` | 模型选择（启动种子，运行期以 WebUI 为准） |
 | LLM | `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` | 模型 Provider |
+| 运行时配置 | `CONFIG_ENCRYPTION_KEY` | WebUI 配置加密主密钥 |
 | 认证 | — | 用户与 API Key 由工作台管理并持久化到数据库 |
 | Embedding | `BAILIAN_API_KEY` / `BAILIAN_WORKSPACE_ID` / `EMBEDDING_MODEL` | 阿里云百炼 |
 | Milvus | `MILVUS_HOST` / `MILVUS_PORT` / `MILVUS_VECTOR_DIM` | 向量数据库 |
 | 解析 | `MINERU_API_KEY` / `MINERU_API_URL` / `MINERU_MODEL_VERSION` | PDF OCR |
+| 搜索工具 | `TAVILY_API_KEY` | Tavily 网络搜索工具 |
+| MCP | `MCP_CONFIG_PATH` | MCP 配置文件路径（启动种子） |
+| 多轮上下文 | `MULTI_AGENT_CONTEXT_MAX_TOKENS` / `MULTI_AGENT_MAX_HISTORY_TURNS` | Multi-Agent 上下文预算 |
 | 存储 | `STORAGE_BACKEND` / `OSS_*` | 文件存储 |
 | 检索 | `REWRITE_MODEL` | 启用 Query 改写 |
 
@@ -359,8 +400,10 @@ Chunk、文档状态和任务状态由 `aiosqlite` 在固定连接上一次提�
 
 - Agent 应用中心与统一导航
 - Chat Agent 流式对话与 Markdown 渲染
+- 多智能体编排：执行追踪时间线、最终交付面板、多轮协作与断点续跑
 - RAG 知识库文档上传、下载、删除与索引状态跟踪
 - 管理员用户与 API Key 管理
+- 配置中心：动态切换 LLM 模型与 MCP 服务
 - 工作台依赖与运行状态监控
 
 ```bash
