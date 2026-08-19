@@ -34,7 +34,39 @@ _PATH_KEYS = {
     "source_path", "destination_path", "directory", "root",
 }
 
-_VISION_MAX_DIMENSION = 2048
+_VISION_DEFAULT_MAX_DIMENSION = 1280
+
+
+def _vision_max_dimension(cfg: McpServerConfig) -> int:
+    raw_value = cfg.env.get(
+        "MKA_VISION_MAX_DIMENSION",
+        os.getenv("MCP_VISION_MAX_DIMENSION", str(_VISION_DEFAULT_MAX_DIMENSION)),
+    )
+    try:
+        configured = int(raw_value)
+    except (TypeError, ValueError):
+        configured = _VISION_DEFAULT_MAX_DIMENSION
+    return max(512, min(2048, configured))
+
+
+def _result_retry_limit(cfg: McpServerConfig) -> int:
+    raw_value = cfg.env.get(
+        "MKA_MCP_RESULT_RETRIES",
+        os.getenv("MCP_RESULT_RETRIES", "1"),
+    )
+    try:
+        configured = int(raw_value)
+    except (TypeError, ValueError):
+        configured = 1
+    return max(0, min(2, configured))
+
+
+def _is_retryable_result(text: str) -> bool:
+    normalized = text.strip().lower()
+    return normalized.startswith(("错误:", "error:")) and any(
+        marker in normalized
+        for marker in ("request timed out", "request timeout", "timed out")
+    )
 
 
 def _prepare_vision_image(
@@ -54,15 +86,16 @@ def _prepare_vision_image(
 
     from PIL import Image, ImageOps
 
+    max_dimension = _vision_max_dimension(cfg)
     with Image.open(source) as opened:
         original_format = opened.format or "PNG"
         image = ImageOps.exif_transpose(opened)
         width, height = image.size
-        if width <= _VISION_MAX_DIMENSION and height <= _VISION_MAX_DIMENSION:
+        if width <= max_dimension and height <= max_dimension:
             return arguments, []
 
         image.thumbnail(
-            (_VISION_MAX_DIMENSION, _VISION_MAX_DIMENSION),
+            (max_dimension, max_dimension),
             Image.Resampling.LANCZOS,
         )
         resized_width, resized_height = image.size
@@ -91,8 +124,10 @@ def _prepare_vision_image(
     normalized = dict(arguments)
     normalized["image_path"] = str(temporary_path)
     logger.info(
-        "Vision image resized for MCP: source=%s original=%dx%d resized=%dx%d temp=%s",
-        source, width, height, resized_width, resized_height, temporary_path,
+        "Vision image resized for MCP: source=%s original=%dx%d resized=%dx%d "
+        "max_dimension=%d temp=%s",
+        source, width, height, resized_width, resized_height, max_dimension,
+        temporary_path,
     )
     return normalized, [temporary_path]
 
@@ -262,53 +297,76 @@ class McpConnection:
             arguments, temporary_paths = await asyncio.to_thread(
                 _prepare_vision_image, self.cfg, arguments,
             )
-            logger.info(
-                "MCP call started: server=%s tool=%s args=%s",
-                self.cfg.name, tool_name, _log_argument_summary(arguments),
-            )
-            call_task = asyncio.create_task(
-                self._session.call_tool(tool_name, arguments),
-            )
             scope = current_file_scope()
             cancel_task = (
                 asyncio.create_task(scope.cancellation_event.wait())
                 if scope is not None and scope.cancellation_event is not None
                 else None
             )
-            waiters = {call_task}
-            if cancel_task is not None:
-                waiters.add(cancel_task)
-            done, _ = await asyncio.wait(
-                waiters,
-                timeout=self.cfg.timeout_seconds,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if cancel_task is not None and cancel_task in done:
-                call_task.cancel()
-                with suppress(BaseException):
-                    await call_task
+            max_attempts = 1 + _result_retry_limit(self.cfg)
+            for attempt in range(1, max_attempts + 1):
                 logger.info(
-                    "MCP call cancelled: server=%s tool=%s elapsed_ms=%d",
-                    self.cfg.name, tool_name,
-                    int((time.monotonic() - started_at) * 1000),
+                    "MCP call started: server=%s tool=%s attempt=%d/%d args=%s",
+                    self.cfg.name, tool_name, attempt, max_attempts,
+                    _log_argument_summary(arguments),
                 )
-                return "[MCP] 工具调用已由用户中止"
-            if call_task not in done:
-                call_task.cancel()
-                with suppress(BaseException):
-                    await call_task
-                raise TimeoutError(
-                    f"MCP 工具调用超过 {self.cfg.timeout_seconds:g} 秒",
+                attempt_started_at = time.monotonic()
+                call_task = asyncio.create_task(
+                    self._session.call_tool(tool_name, arguments),
                 )
-            result = await call_task
-            self._failures = 0
-            text = _extract_text(result)
-            logger.info(
-                "MCP call completed: server=%s tool=%s elapsed_ms=%d result_chars=%d",
-                self.cfg.name, tool_name,
-                int((time.monotonic() - started_at) * 1000), len(text),
-            )
-            return text
+                waiters = {call_task}
+                if cancel_task is not None:
+                    waiters.add(cancel_task)
+                done, _ = await asyncio.wait(
+                    waiters,
+                    timeout=self.cfg.timeout_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if cancel_task is not None and cancel_task in done:
+                    call_task.cancel()
+                    with suppress(BaseException):
+                        await call_task
+                    logger.info(
+                        "MCP call cancelled: server=%s tool=%s elapsed_ms=%d",
+                        self.cfg.name, tool_name,
+                        int((time.monotonic() - started_at) * 1000),
+                    )
+                    return "[MCP] 工具调用已由用户中止"
+                if call_task not in done:
+                    call_task.cancel()
+                    with suppress(BaseException):
+                        await call_task
+                    raise TimeoutError(
+                        f"MCP 工具调用超过 {self.cfg.timeout_seconds:g} 秒",
+                    )
+                result = await call_task
+                self._failures = 0
+                text = _extract_text(result)
+                attempt_ms = int((time.monotonic() - attempt_started_at) * 1000)
+                if _is_retryable_result(text):
+                    if attempt < max_attempts:
+                        logger.warning(
+                            "MCP result retrying: server=%s tool=%s attempt=%d/%d "
+                            "elapsed_ms=%d reason=%s",
+                            self.cfg.name, tool_name, attempt, max_attempts,
+                            attempt_ms, text,
+                        )
+                        continue
+                    logger.error(
+                        "MCP result retries exhausted: server=%s tool=%s "
+                        "attempts=%d elapsed_ms=%d reason=%s",
+                        self.cfg.name, tool_name, max_attempts,
+                        int((time.monotonic() - started_at) * 1000), text,
+                    )
+                    return f"[MCP] 工具结果重试已耗尽: {text}"
+                logger.info(
+                    "MCP call completed: server=%s tool=%s attempt=%d/%d "
+                    "elapsed_ms=%d total_elapsed_ms=%d result_chars=%d",
+                    self.cfg.name, tool_name, attempt, max_attempts, attempt_ms,
+                    int((time.monotonic() - started_at) * 1000), len(text),
+                )
+                return text
+            return "[MCP] 工具调用未返回结果"
         except Exception as e:
             self._failures += 1
             if self._failures >= 3:

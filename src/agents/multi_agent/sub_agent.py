@@ -847,6 +847,8 @@ class SubAgent(BaseAgent):
             return (text, False)
         if text.startswith("[MCP] 工具调用失败:"):
             return (text, True)
+        if text.startswith("[MCP] 工具结果重试已耗尽:"):
+            return (text, False)
         if text.startswith("[MCP] 工具调用已由用户中止"):
             return (text, False)
         normalized = text.strip().lower()

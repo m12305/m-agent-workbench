@@ -52,6 +52,19 @@ class _FakeSession:
         return SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")])
 
 
+class _SequencedSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    async def call_tool(self, name, arguments):
+        self.calls.append((name, arguments))
+        text = self.responses.pop(0)
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=text)],
+        )
+
+
 def test_extract_text():
     result = SimpleNamespace(content=[
         SimpleNamespace(type="text", text="hello"),
@@ -79,8 +92,8 @@ def test_prepare_vision_image_downscales_oversized_input(tmp_path):
         assert arguments["image_path"] == str(temporary_path)
         assert temporary_path != source
         with Image.open(temporary_path) as resized:
-            assert resized.width <= 2048
-            assert resized.height <= 2048
+            assert resized.width <= 1280
+            assert resized.height <= 1280
     finally:
         temporary_path.unlink(missing_ok=True)
 
@@ -91,6 +104,45 @@ async def test_call_succeeds():
     conn._session = _FakeSession()
     conn.available = True
     assert await conn.call("search", {"q": "x"}) == "ok"
+
+
+@pytest.mark.asyncio
+async def test_call_retries_timeout_result_without_replanning_subagent():
+    session = _SequencedSession(["错误: Request timed out.", "vision result"])
+    conn = McpConnection(McpServerConfig(
+        name="eyes",
+        transport="stdio",
+        command="python",
+        env={"MKA_MCP_RESULT_RETRIES": "1"},
+    ))
+    conn._session = session
+    conn.available = True
+
+    result = await conn.call("analyze_image", {"image_path": "image.png"})
+
+    assert result == "vision result"
+    assert len(session.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_call_marks_timeout_result_non_retryable_after_retry_limit():
+    session = _SequencedSession([
+        "错误: Request timed out.",
+        "错误: Request timed out.",
+    ])
+    conn = McpConnection(McpServerConfig(
+        name="eyes",
+        transport="stdio",
+        command="python",
+        env={"MKA_MCP_RESULT_RETRIES": "1"},
+    ))
+    conn._session = session
+    conn.available = True
+
+    result = await conn.call("analyze_image", {"image_path": "image.png"})
+
+    assert result.startswith("[MCP] 工具结果重试已耗尽:")
+    assert len(session.calls) == 2
 
 
 @pytest.mark.asyncio

@@ -173,6 +173,17 @@ def test_subagent_marks_mcp_validation_text_as_non_retryable():
     assert failure == (str(message.content), False)
 
 
+def test_subagent_does_not_repeat_exhausted_mcp_result_retries():
+    message = ToolMessage(
+        content="[MCP] 工具结果重试已耗尽: 错误: Request timed out.",
+        tool_call_id="call-3",
+    )
+
+    failure = SubAgent._tool_failure(message, str(message.content))
+
+    assert failure == (str(message.content), False)
+
+
 class _MainAgentStructuredModel:
     def __init__(self, schema):
         self.schema = schema

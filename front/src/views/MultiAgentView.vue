@@ -247,7 +247,7 @@
                 <span></span><span></span><span></span>
               </div>
 
-              <div v-else class="ma-timeline">
+              <div v-else ref="traceTimeline" class="ma-timeline" @scroll="handleTraceScroll">
                 <article
                   v-for="event in traceEvents"
                   :key="event.id"
@@ -313,7 +313,7 @@
                 <p>{{ cancelledMessage }}</p>
               </div>
 
-              <div v-else-if="answerText" class="message-markdown ma-answer-content" v-html="renderedAnswer"></div>
+              <div v-else-if="answerText" ref="answerContent" class="message-markdown ma-answer-content" v-html="renderedAnswer"></div>
 
               <div v-else-if="running" class="ma-answer-skeleton" aria-label="正在等待综合结果">
                 <div><span></span><span></span></div>
@@ -381,7 +381,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, type Component } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Component } from 'vue'
 import {
   PhArrowLeft as ArrowLeft,
   PhBrain as Brain,
@@ -483,11 +483,14 @@ const currentTask = ref('')
 const running = ref(false)
 const events = ref<RunEvent[]>([])
 const outputPanel = ref<HTMLElement | null>(null)
+const traceTimeline = ref<HTMLElement | null>(null)
+const answerContent = ref<HTMLElement | null>(null)
 const composerInput = ref<HTMLTextAreaElement | null>(null)
 const composerFocused = ref(false)
 const copied = ref(false)
 const runStartedAt = ref(0)
 const shouldAutoScroll = ref(true)
+const traceShouldAutoScroll = ref(true)
 const activeController = ref<AbortController | null>(null)
 const activeSessionId = ref('')
 const activeTurnId = ref('')
@@ -582,6 +585,14 @@ const answerText = computed(() => {
 })
 
 const renderedAnswer = computed(() => DOMPurify.sanitize(marked.parse(answerText.value) as string))
+
+watch(answerText, () => {
+  if (!running.value) return
+  nextTick(() => {
+    const element = answerContent.value
+    if (element) element.scrollTop = element.scrollHeight
+  })
+})
 
 const activeStageIndex = computed(() => {
   if (!hasRun.value) return -1
@@ -737,6 +748,7 @@ function elapsedLabel(event: RunEvent): string {
 function pushEvent(type: string, data: Record<string, unknown>) {
   if (type === 'done' && events.value.some((event) => event.type === 'done')) return
   events.value.push({ id: ++eventSequence, type, data, receivedAt: Date.now() })
+  scrollTraceToBottom()
   scrollToBottom()
 }
 
@@ -766,6 +778,20 @@ function handleOutputScroll() {
   const panel = outputPanel.value
   if (!panel) return
   shouldAutoScroll.value = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 96
+}
+
+function handleTraceScroll() {
+  const element = traceTimeline.value
+  if (!element) return
+  traceShouldAutoScroll.value = element.scrollHeight - element.scrollTop - element.clientHeight < 64
+}
+
+function scrollTraceToBottom() {
+  if (!traceShouldAutoScroll.value) return
+  nextTick(() => {
+    const element = traceTimeline.value
+    if (element) element.scrollTop = element.scrollHeight
+  })
 }
 
 function scrollToBottom(force = false) {
@@ -965,6 +991,7 @@ function resetRun() {
   sessionAttachments.value = []
   workspacePath.value = workspaceRoots.value[0] || ''
   shouldAutoScroll.value = true
+  traceShouldAutoScroll.value = true
   nextTick(() => composerInput.value?.focus())
 }
 
@@ -1092,6 +1119,7 @@ async function submitTask() {
   activeTurnId.value = ''
   runStartedAt.value = Date.now()
   shouldAutoScroll.value = true
+  traceShouldAutoScroll.value = true
   copied.value = false
   scrollToBottom(true)
 
@@ -1475,8 +1503,10 @@ onBeforeUnmount(() => {
 .ma-attachment-chip button:hover { background: var(--surface-hover); color: var(--danger); }
 
 .ma-output {
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
   padding: clamp(20px, 3vw, 36px);
   background: var(--bg);
@@ -1527,6 +1557,7 @@ onBeforeUnmount(() => {
 
 .ma-conversation {
   width: min(100%, 920px);
+  min-width: 0;
   margin: 0 auto 24px;
   display: grid;
   gap: 14px;
@@ -1534,6 +1565,8 @@ onBeforeUnmount(() => {
 
 .ma-conversation-message {
   width: min(82%, 760px);
+  min-width: 0;
+  max-width: 100%;
   padding: 14px 16px;
   display: grid;
   gap: 7px;
@@ -1550,6 +1583,7 @@ onBeforeUnmount(() => {
 }
 
 .ma-conversation-message.is-assistant { justify-self: start; }
+.ma-conversation-message .message-markdown { min-width: 0; max-width: 100%; }
 .ma-conversation-role { color: var(--text-muted); font-size: 0.61rem; font-weight: 750; }
 .ma-conversation-message > p { color: var(--text); font-size: 0.79rem; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ma-conversation-message > small { color: var(--warning); font-size: 0.62rem; font-weight: 680; }
@@ -1576,16 +1610,24 @@ onBeforeUnmount(() => {
 
 .ma-results-grid {
   width: min(100%, 1180px);
+  min-width: 0;
+  min-height: 0;
   margin: 0 auto;
   display: grid;
   grid-template-columns: minmax(330px, 0.82fr) minmax(0, 1.18fr);
-  align-items: start;
+  align-items: stretch;
   gap: 16px;
 }
 
 .ma-trace-panel,
 .ma-answer-panel {
+  width: 100%;
   min-width: 0;
+  min-height: 0;
+  height: clamp(400px, calc(100dvh - 300px), 640px);
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--surface);
@@ -1593,8 +1635,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.ma-answer-panel { position: sticky; top: 0; }
-.ma-panel-header { min-height: 57px; padding: 0 17px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--line); background: var(--surface-raised); }
+.ma-panel-header { flex: 0 0 auto; min-height: 57px; padding: 0 17px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--line); background: var(--surface-raised); }
 .ma-panel-header > div { display: flex; align-items: center; gap: 8px; }
 .ma-panel-header svg { color: var(--accent); }
 .ma-panel-header h3 { font-size: 0.79rem; letter-spacing: -0.01em; }
@@ -1614,7 +1655,18 @@ onBeforeUnmount(() => {
 
 .ma-copy-button:hover { background: var(--surface-hover); color: var(--text); }
 
-.ma-timeline { padding: 8px 17px 15px; }
+.ma-timeline {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  padding: 8px 17px 15px;
+}
 .ma-trace-event {
   min-width: 0;
   display: grid;
@@ -1631,39 +1683,103 @@ onBeforeUnmount(() => {
 .ma-trace-event.is-accent .ma-trace-icon { background: var(--accent-soft); color: var(--accent); }
 .ma-trace-event.is-success .ma-trace-icon { background: var(--success-soft); color: var(--success); }
 .ma-trace-event.is-error .ma-trace-icon { background: var(--danger-soft); color: var(--danger); }
-.ma-trace-copy { min-width: 0; padding-top: 3px; }
+.ma-trace-copy { min-width: 0; max-width: 100%; padding-top: 3px; }
 .ma-trace-copy > header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.ma-trace-copy > header strong { color: var(--text); font-size: 0.72rem; }
+.ma-trace-copy > header strong { min-width: 0; color: var(--text); font-size: 0.72rem; overflow-wrap: anywhere; word-break: break-word; }
 .ma-trace-copy time { flex: 0 0 auto; color: var(--text-muted); font: 0.58rem 'Cascadia Code', 'SFMono-Regular', monospace; }
-.ma-trace-copy > p { margin-top: 5px; color: var(--text-soft); font-size: 0.68rem; line-height: 1.55; overflow-wrap: anywhere; }
+.ma-trace-copy > p { max-width: 100%; margin-top: 5px; color: var(--text-soft); font-size: 0.68rem; line-height: 1.55; overflow-wrap: anywhere; word-break: break-word; }
 
 .ma-plan-list { margin: 11px 0 1px; padding: 0; list-style: none; display: grid; gap: 8px; }
 .ma-plan-list li { min-width: 0; display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; }
 .ma-plan-list li > span { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 7px; background: var(--surface-subtle); color: var(--text-muted); font: 0.58rem 'Cascadia Code', 'SFMono-Regular', monospace; }
 .ma-plan-list li > div { min-width: 0; display: grid; gap: 3px; }
-.ma-plan-list strong { color: var(--text-soft); font-size: 0.66rem; line-height: 1.45; }
-.ma-plan-list small { width: fit-content; color: var(--accent); font-size: 0.58rem; font-weight: 650; }
+.ma-plan-list strong { color: var(--text-soft); font-size: 0.66rem; line-height: 1.45; overflow-wrap: anywhere; }
+.ma-plan-list small { width: fit-content; max-width: 100%; color: var(--accent); font-size: 0.58rem; font-weight: 650; overflow-wrap: anywhere; word-break: break-word; }
 .ma-complexity { display: inline-flex; margin-top: 8px; padding: 4px 7px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); font-size: 0.58rem; font-weight: 700; }
 
-.ma-trace-skeleton { padding: 20px 18px; display: grid; gap: 13px; }
+.ma-trace-skeleton {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 18px;
+  display: grid;
+  gap: 13px;
+}
 .ma-trace-skeleton span { display: block; height: 48px; border-radius: var(--radius-sm); background: var(--surface-subtle); animation: ma-skeleton 1.3s ease-in-out infinite alternate; }
 .ma-trace-skeleton span:nth-child(2) { width: 88%; }.ma-trace-skeleton span:nth-child(3) { width: 72%; }
 @keyframes ma-skeleton { to { opacity: 0.45; } }
 
-.ma-answer-content { min-height: 260px; padding: 24px 25px 28px; font-size: 0.82rem; }
+.ma-answer-content {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  padding: 24px 25px 28px;
+  font-size: 0.82rem;
+}
 .ma-answer-content:deep(h1:first-child),
 .ma-answer-content:deep(h2:first-child),
 .ma-answer-content:deep(h3:first-child) { margin-top: 0; }
 .ma-answer-content:deep(p:last-child) { margin-bottom: 0; }
+.ma-conversation-message .message-markdown:deep(p),
+.ma-conversation-message .message-markdown:deep(li),
+.ma-conversation-message .message-markdown:deep(blockquote),
+.ma-answer-content:deep(p),
+.ma-answer-content:deep(li),
+.ma-answer-content:deep(blockquote) { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+.ma-conversation-message .message-markdown:deep(pre),
+.ma-answer-content:deep(pre) { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.ma-conversation-message .message-markdown:deep(table),
+.ma-answer-content:deep(table) { width: 100%; max-width: 100%; table-layout: fixed; }
+.ma-conversation-message .message-markdown:deep(th),
+.ma-conversation-message .message-markdown:deep(td),
+.ma-answer-content:deep(th),
+.ma-answer-content:deep(td) { overflow-wrap: anywhere; word-break: break-word; }
 
-.ma-answer-skeleton { min-height: 300px; padding: 27px 25px; display: grid; align-content: start; gap: 13px; }
+.ma-answer-skeleton {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  padding: 27px 25px;
+  display: grid;
+  align-content: start;
+  gap: 13px;
+}
 .ma-answer-skeleton div { margin-bottom: 6px; display: flex; align-items: center; gap: 9px; }
 .ma-answer-skeleton span,
 .ma-answer-skeleton i { display: block; height: 13px; border-radius: 5px; background: var(--surface-subtle); animation: ma-skeleton 1.3s ease-in-out infinite alternate; }
 .ma-answer-skeleton span:first-child { width: 41%; height: 19px; }.ma-answer-skeleton span:last-child { width: 16%; height: 19px; }
 .ma-answer-skeleton i:nth-of-type(1) { width: 96%; }.ma-answer-skeleton i:nth-of-type(2) { width: 91%; }.ma-answer-skeleton i:nth-of-type(3) { width: 78%; }.ma-answer-skeleton i:nth-of-type(4) { width: 86%; }
 
-.ma-answer-state { min-height: 300px; padding: 34px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--text-muted); }
+.ma-answer-state {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  padding: 34px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: safe center;
+  text-align: center;
+  color: var(--text-muted);
+}
 .ma-answer-state svg { margin-bottom: 12px; }
 .ma-answer-state strong { color: var(--text); font-size: 0.8rem; }
 .ma-answer-state p { max-width: 38ch; margin-top: 6px; font-size: 0.68rem; line-height: 1.55; }
@@ -1671,7 +1787,7 @@ onBeforeUnmount(() => {
 .ma-answer-state.is-error strong { color: var(--danger); }
 .ma-answer-state.is-stopped { color: var(--warning); background: color-mix(in srgb, var(--warning-soft) 38%, var(--surface)); }
 .ma-answer-state.is-stopped strong { color: var(--warning); }
-.ma-answer-footer { min-height: 42px; padding: 0 17px; display: flex; align-items: center; gap: 7px; border-top: 1px solid var(--line); background: var(--success-soft); color: var(--success); font-size: 0.64rem; font-weight: 680; }
+.ma-answer-footer { flex: 0 0 auto; min-height: 42px; padding: 0 17px; display: flex; align-items: center; gap: 7px; border-top: 1px solid var(--line); background: var(--success-soft); color: var(--success); font-size: 0.64rem; font-weight: 680; }
 
 .ma-composer-wrap { padding: 11px clamp(20px, 3vw, 36px) 13px; border-top: 1px solid var(--line); background: var(--surface); }
 .ma-composer { width: min(100%, 900px); margin: 0 auto; padding: 10px 11px 9px 14px; border: 1px solid var(--line-strong); border-radius: var(--radius-lg); background: var(--surface-raised); box-shadow: var(--shadow-sm); transition: border-color 150ms ease, box-shadow 150ms ease; }
