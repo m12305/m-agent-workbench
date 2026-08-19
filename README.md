@@ -9,6 +9,7 @@
 - **Agent 应用中心**：从统一入口访问不同 Agent，当前提供 Chat Agent 与多智能体（Plan-and-Solve 编排）。
 - **流式智能对话**：支持 SSE 流式回答、多轮会话和会话历史。
 - **多智能体编排**：MainAgent 负责任务分析、计划制定与调度，多个 SubAgent 分工执行并综合结果。
+- **会话工作区与只读附件**：Multi-Agent 会话绑定一个本地工作区（只读/读写），可上传对话附件；执行受文件作用域沙箱约束，MCP 工具据此做路径权限门控。
 - **多轮协作与断点续跑**：同一会话内可追问、修改任务，或「继续」中止的编排执行，历史对话经摘要压缩进入上下文。
 - **运行时配置中心**：在 WebUI 中动态切换 LLM 模型与外部 MCP 服务，保存后新请求立即生效，无需重启（密钥加密落库）。
 - **MCP 外部工具集成**：连接 stdio / streamable-http 外部 MCP Server，自动发现工具并按 `subagents` 字段注入指定子智能体。
@@ -29,6 +30,8 @@
 
 <img title="" src="images/knowledge.png" alt="" width="735">
 
+<img title="" src="images/config.png" alt="" width="735">
+
 ---
 
 ## 项目结构
@@ -37,11 +40,11 @@
 m-agent-workbench/
 ├── src/
 │   ├── agents/                    # Agent 层：BaseAgent / ChatAgent
-│   │   └── multi_agent/           # 多智能体：MainAgent 编排 + SubAgent + 注册中心
+│   │   └── multi_agent/           # 多智能体：MainAgent 编排 + 出厂 SubAgent(general_assistant / workspace_file_agent / vision_agent) + 注册中心
 │   ├── tools/                     # Agent 工具基类与注册表
 │   │   ├── backend_api/           # 后端 API 工具（遥感、Tavily 搜索）
 │   │   ├── general/               # 通用工具
-│   │   ├── mcp/                   # MCP 适配（配置 / 传输 / 连接 / 发现 / 转换）
+│   │   ├── mcp/                   # MCP 适配（配置 / 传输 / 连接 / 发现 / 转换 / 文件作用域权限）
 │   │   ├── single_agent_planning/ # 单智能体规划工具
 │   │   └── multi_agent_planning/  # 多智能体规划工具
 │   ├── models/                    # LLM 适配
@@ -62,7 +65,7 @@ m-agent-workbench/
 │       ├── main.py                # 应用初始化与生命周期
 │       ├── api/                   # 认证、用户、会话、Chat、Multi-Agent、运行时配置 API
 │       ├── repositories/          # SQLite / Memory 存储实现（含运行时配置、消息、轮次、摘要）
-│       ├── services/              # 认证、会话、对话、多智能体编排、运行时配置、密钥加密
+│       ├── services/              # 认证、会话、对话、多智能体编排、工作区/附件、运行时配置、密钥加密
 │       ├── middleware/            # 中间件
 │       ├── bootstrap_admin.py     # 初始化首位管理员
 │       └── exceptions.py          # 统一异常
@@ -256,7 +259,13 @@ sudo docker compose up -d --build     # 更新后重新构建
 | `POST` | `/api/v1/multi-agent/chat/stream` | SSE 流式多智能体问答 |
 | `POST` | `/api/v1/multi-agent/chat/{session_id}/cancel` | 取消运行中的编排 |
 
-请求体: `{ "query", "session_id" }`（`session_id` 不传则自动创建新会话）。
+请求体: `{ "query", "session_id", "attachment_ids" }`
+（`session_id` **必填**，须为已配置工作区的会话，否则返回 `WORKSPACE_REQUIRED`(409)；
+`attachment_ids` 可选，列出本轮引用的会话附件 ID）。
+
+> Multi-Agent 会话引入**工作区与只读附件**机制：执行被绑定到会话文件作用域（`ExecutionFileScope`），
+> 工作区文件助手与 MCP 工具仅能读写被授权的路径，附件始终只读。详细全链路见
+> [docs/multi-agent-request-flow-v2.md](docs/multi-agent-request-flow-v2.md)。
 
 事件类型: `start` / `turn_started` / `status` / `analyzing` / `analysis_done` / `plan_created` /
 `dispatching` / `subagent_start` / `subagent_plan` / `subagent_step` / `subagent_progress` /
@@ -326,7 +335,7 @@ LLM 模型与 MCP 服务为运行时可配置项，由 `RuntimeConfigService` �
 - 修改保存后热更新：重建 Agent 与工具 Registry，新请求立即生效，旧实例退役后异步关闭。
 - MCP 支持 stdio（本地子进程）与 streamable-http（远程），工具按 `subagents` 字段注入子智能体。
 
-完整链路见 [docs/multi-agent-request-flow.md](docs/multi-agent-request-flow.md) 与 [docs/mcp-tool-discovery-flow.md](docs/mcp-tool-discovery-flow.md)。
+完整链路见 [docs/multi-agent-request-flow-v2.md](docs/multi-agent-request-flow-v2.md)（全链路）与 [docs/mcp-tool-discovery-flow.md](docs/mcp-tool-discovery-flow.md)。
 
 ### 用户数据隔离
 
@@ -385,6 +394,7 @@ Chunk、文档状态和任务状态由 `aiosqlite` 在固定连接上一次提�
 | 搜索工具 | `TAVILY_API_KEY` | Tavily 网络搜索工具 |
 | MCP | `MCP_CONFIG_PATH` | MCP 配置文件路径（启动种子） |
 | 多轮上下文 | `MULTI_AGENT_CONTEXT_MAX_TOKENS` / `MULTI_AGENT_MAX_HISTORY_TURNS` | Multi-Agent 上下文预算 |
+| Multi-Agent 工作区 | `MULTI_AGENT_WORKSPACE_ROOTS` / `MULTI_AGENT_ATTACHMENT_DIR` / `MULTI_AGENT_ATTACHMENT_MAX_MB` | 允许的工作区白名单、附件存储目录与单附件上限 |
 | 存储 | `STORAGE_BACKEND` / `OSS_*` | 文件存储 |
 | 检索 | `REWRITE_MODEL` | 启用 Query 改写 |
 
@@ -400,7 +410,8 @@ Chunk、文档状态和任务状态由 `aiosqlite` 在固定连接上一次提�
 
 - Agent 应用中心与统一导航
 - Chat Agent 流式对话与 Markdown 渲染
-- 多智能体编排：执行追踪时间线、最终交付面板、多轮协作与断点续跑
+- 多智能体编排：执行追踪时间线（含子智能体/工具调用事件透传）、最终交付面板、多轮协作与断点续跑
+- Multi-Agent 工作区：会话工作区选择（只读/读写）、附件上传与引用
 - RAG 知识库文档上传、下载、删除与索引状态跟踪
 - 管理员用户与 API Key 管理
 - 配置中心：动态切换 LLM 模型与 MCP 服务
