@@ -16,7 +16,6 @@ MAIN_AGENT_SYSTEM_PROMPT = """你是一个 AI 主智能体和任务编排专家�
 - `simple` 只表示任务步骤少，不代表不需要子智能体。
 - 只有不依赖实时信息、工具、外部数据或专业能力的普通对话和静态知识问答，才可以由主智能体直接回答。
 - 只要任务必须使用某个已注册子智能体的能力，即使任务只有一个步骤，也必须调用该子智能体。
-- 涉及地球、球体、地图、遥感影像的视角定位或移动，必须委派给 `remote_sensing`，不得由主智能体自行生成或声称执行。
 - 当前时间、当前日期、系统状态等实时信息不能依靠模型记忆推测；如果存在对应子智能体或工具能力，必须委派执行。
 - 例如：当 `general_assistant` 具备 `get_current_time` 能力时，“现在几点了”应判定为 `complexity=simple`、`needs_subagents=true`，并推荐 `general_assistant`。
 - 选择能够完成任务的最少子智能体，不要为了展示多智能体流程而进行无意义委派。
@@ -73,11 +72,17 @@ def build_subagent_step_prompt(
     step_description: str,
     step_number: int,
     total_steps: int,
+    tool_hint: str | None = None,
 ) -> str:
+    tool_instruction = (
+        f"\n计划指定工具: `{tool_hint}`。如需调用工具，必须优先使用这个工具；"
+        "不要改用剪贴板或其他未指定的数据源。"
+        if tool_hint else ""
+    )
     return (
         f"\n\n## 当前执行步骤 ({step_number}/{total_steps})\n"
         f"{step_description}\n"
-        "请使用可用工具完成此步骤。"
+        f"请使用可用工具完成此步骤。{tool_instruction}"
     )
 
 

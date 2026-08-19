@@ -1,7 +1,6 @@
 """PDFChunker — 以页为边界，单页大内容按段细分"""
 
-import tiktoken
-from .base import ChunkingStrategy, Chunk
+from .base import ChunkingStrategy, Chunk, get_token_encoder
 from ..parsing.base import ParsedDocument
 
 MAX_TOKENS = 512
@@ -14,7 +13,7 @@ class PDFChunker:
         return "pdf"
 
     def chunk(self, parsed: ParsedDocument, document_id: str) -> list[Chunk]:
-        enc = tiktoken.get_encoding("cl100k_base")
+        enc = get_token_encoder()
         chunks = []
         for page in parsed.pages:
             page_tokens = enc.encode(page.text)

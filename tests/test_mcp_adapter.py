@@ -3,8 +3,14 @@ import asyncio
 
 import pytest
 from mcp.types import Tool
+from PIL import Image
 
-from src.tools.mcp.adapter import McpAdapter, McpConnection, _extract_text
+from src.tools.mcp.adapter import (
+    McpAdapter,
+    McpConnection,
+    _extract_text,
+    _prepare_vision_image,
+)
 from src.tools.mcp.config import McpConfig, McpServerConfig
 from src.tools.mcp.transport import (
     StdioTransport,
@@ -55,6 +61,30 @@ def test_extract_text():
     assert _extract_text(result) == "hello\nworld"
 
 
+def test_prepare_vision_image_downscales_oversized_input(tmp_path):
+    source = tmp_path / "large.png"
+    Image.new("RGB", (2848, 1600), "white").save(source)
+    cfg = McpServerConfig(
+        name="eyes",
+        transport="stdio",
+        command="python",
+        subagents=["vision_agent"],
+    )
+
+    arguments, temporary_paths = _prepare_vision_image(
+        cfg, {"image_path": str(source)},
+    )
+    temporary_path = temporary_paths[0]
+    try:
+        assert arguments["image_path"] == str(temporary_path)
+        assert temporary_path != source
+        with Image.open(temporary_path) as resized:
+            assert resized.width <= 2048
+            assert resized.height <= 2048
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 @pytest.mark.asyncio
 async def test_call_succeeds():
     conn = McpConnection(McpServerConfig(name="k", transport="stdio", command="python"))
@@ -80,6 +110,31 @@ async def test_call_returns_error_text_when_unavailable():
     conn = McpConnection(McpServerConfig(name="k", transport="stdio", command="python"))
     conn.available = False
     assert "不可用" in await conn.call("search", {})
+
+
+@pytest.mark.asyncio
+async def test_call_reconnects_a_previously_connected_server():
+    conn = McpConnection(
+        McpServerConfig(name="k", transport="stdio", command="python"),
+    )
+    session = _FakeSession()
+    conn._ever_connected = True
+    conn.available = False
+
+    async def fake_close_transport():
+        conn.available = False
+        conn._session = None
+
+    async def fake_connect():
+        conn._session = session
+        conn.available = True
+        conn._failures = 0
+
+    conn._close_transport = fake_close_transport
+    conn.connect = fake_connect
+
+    assert await conn.call("search", {"q": "x"}) == "ok"
+    assert session.calls == [("search", {"q": "x"})]
 
 
 # ── Task 5: 发现编排 ──
@@ -124,6 +179,45 @@ async def test_discover_namespaces_and_whitelist(monkeypatch):
 async def test_discover_disabled_returns_empty():
     tools, metas = await McpAdapter(McpConfig(enabled=False)).discover()
     assert tools == [] and metas == {}
+
+
+@pytest.mark.asyncio
+async def test_discover_respects_current_empty_session_tool_blocklist(monkeypatch):
+    class VisionConnection(_FakeMcpConnection):
+        async def list_tools(self):
+            return [
+                Tool(
+                    name="analyze_clipboard",
+                    description="read OS clipboard",
+                    input_schema={"type": "object", "properties": {}},
+                ),
+                Tool(
+                    name="analyze_image",
+                    description="analyze image path",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"image_path": {"type": "string"}},
+                        "required": ["image_path"],
+                    },
+                ),
+            ]
+
+    monkeypatch.setattr("src.tools.mcp.adapter.McpConnection", VisionConnection)
+    cfg = McpConfig(enabled=True, servers=[
+        McpServerConfig(
+            name="eyes",
+            transport="stdio",
+            command="python",
+            allowed_tools=["*"],
+            subagents=["vision_agent"],
+        ),
+    ])
+
+    tools, _ = await McpAdapter(cfg).discover()
+
+    assert [tool.name for tool in tools] == [
+        "eyes_analyze_clipboard", "eyes_analyze_image",
+    ]
 
 
 @pytest.mark.asyncio

@@ -5,9 +5,11 @@ from .base import (
     RuntimeConfigRepository,
     SessionMessageRepository, MultiAgentTurnRepository,
     ConversationSummaryRepository,
+    MultiAgentWorkspaceRepository, MultiAgentAttachmentRepository,
     User, ApiKey, Session, SessionType, Identity,
     Document, ChunkRecord, TaskRecord, RuntimeConfigRecord,
     SessionMessage, MultiAgentTurn, ConversationSummary,
+    MultiAgentWorkspace, MultiAgentAttachment,
 )
 from .memory import (
     InMemoryUserRepo, InMemoryApiKeyRepo, InMemorySessionRepo,
@@ -15,6 +17,7 @@ from .memory import (
     InMemoryRuntimeConfigRepo,
     InMemorySessionMessageRepo, InMemoryMultiAgentTurnRepo,
     InMemoryConversationSummaryRepo,
+    InMemoryMultiAgentWorkspaceRepo, InMemoryMultiAgentAttachmentRepo,
 )
 from .sqlite import (
     SqliteDb,
@@ -23,6 +26,7 @@ from .sqlite import (
     SqliteRuntimeConfigRepo,
     SqliteSessionMessageRepo, SqliteMultiAgentTurnRepo,
     SqliteConversationSummaryRepo,
+    SqliteMultiAgentWorkspaceRepo, SqliteMultiAgentAttachmentRepo,
     DEFAULT_DB_PATH,
 )
 
@@ -32,15 +36,18 @@ __all__ = [
     "RuntimeConfigRepository",
     "SessionMessageRepository", "MultiAgentTurnRepository",
     "ConversationSummaryRepository",
+    "MultiAgentWorkspaceRepository", "MultiAgentAttachmentRepository",
     "User", "ApiKey", "Session", "SessionType", "Identity",
     "Document", "ChunkRecord", "TaskRecord", "RuntimeConfigRecord",
     "SessionMessage", "MultiAgentTurn", "ConversationSummary",
+    "MultiAgentWorkspace", "MultiAgentAttachment",
     # 内存实现
     "InMemoryUserRepo", "InMemoryApiKeyRepo", "InMemorySessionRepo",
     "InMemoryDocumentRepo", "InMemoryChunkRepo", "InMemoryTaskRepo",
     "InMemoryRuntimeConfigRepo",
     "InMemorySessionMessageRepo", "InMemoryMultiAgentTurnRepo",
     "InMemoryConversationSummaryRepo",
+    "InMemoryMultiAgentWorkspaceRepo", "InMemoryMultiAgentAttachmentRepo",
     # SQLite 持久化
     "SqliteDb",
     "SqliteUserRepo", "SqliteApiKeyRepo", "SqliteSessionRepo",
@@ -48,5 +55,6 @@ __all__ = [
     "SqliteRuntimeConfigRepo",
     "SqliteSessionMessageRepo", "SqliteMultiAgentTurnRepo",
     "SqliteConversationSummaryRepo",
+    "SqliteMultiAgentWorkspaceRepo", "SqliteMultiAgentAttachmentRepo",
     "DEFAULT_DB_PATH",
 ]

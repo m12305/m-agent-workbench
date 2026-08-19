@@ -199,7 +199,7 @@ async def test_mcp_config_can_be_created_toggled_listed_and_deleted(runtime_serv
     assert created["status"] == "connected"
     assert created["tool_count"] == 1
     assert created["headers"] == {"Authorization": "••••••••"}
-    assert multi.configs[-1]["sub_agent_registry"].count == 2
+    assert multi.configs[-1]["sub_agent_registry"].count == 3
 
     disabled = await service.set_mcp_enabled(created["config_id"], False)
     assert disabled["enabled"] is False

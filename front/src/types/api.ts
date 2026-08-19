@@ -2,6 +2,7 @@ export type Role = 'user' | 'admin'
 export type KnowledgeScope = 'private' | 'shared' | 'hybrid'
 export type DocumentScope = 'private' | 'shared'
 export type SessionType = 'chat' | 'multi_agent'
+export type WorkspacePermission = 'read_only' | 'read_write'
 
 export interface Identity {
   user_id: string
@@ -164,6 +165,28 @@ export interface ApiErrorBody {
 export interface StreamEvent {
   event: 'start' | 'token' | 'done' | 'error' | string
   data: Record<string, unknown>
+}
+
+export interface MultiAgentWorkspace {
+  session_id: string
+  root_path: string
+  permission: WorkspacePermission
+  created_at: string
+  updated_at: string
+}
+
+export type MultiAgentAttachmentKind = 'text' | 'image' | 'pdf_office_unparsed' | 'binary'
+
+export interface MultiAgentAttachment {
+  attachment_id: string
+  session_id: string
+  turn_id: string | null
+  filename: string
+  mime_type: string
+  file_size: number
+  source: 'file_picker' | 'clipboard'
+  kind: MultiAgentAttachmentKind
+  created_at: string
 }
 
 export type LlmProvider = 'openai' | 'deepseek' | 'anthropic'

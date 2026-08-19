@@ -17,7 +17,9 @@ from fastapi.responses import JSONResponse
 
 from .api import api_router
 from .middleware import LoggingMiddleware, AuthMiddleware, setup_cors
-from .services import AuthService, SessionService, ChatService
+from .services import (
+    AuthService, SessionService, ChatService, MultiAgentWorkspaceService,
+)
 from ..rag.retrieval import RetrievalService
 from .services.multi_agent_service import MultiAgentService
 from .services.runtime_config_service import RuntimeConfigService
@@ -29,12 +31,14 @@ from .repositories import (
     InMemoryRuntimeConfigRepo,
     InMemorySessionMessageRepo, InMemoryMultiAgentTurnRepo,
     InMemoryConversationSummaryRepo,
+    InMemoryMultiAgentWorkspaceRepo, InMemoryMultiAgentAttachmentRepo,
     SqliteDb,
     SqliteUserRepo, SqliteApiKeyRepo, SqliteSessionRepo,
     SqliteDocumentRepo, SqliteChunkRepo, SqliteTaskRepo,
     SqliteRuntimeConfigRepo,
     SqliteSessionMessageRepo, SqliteMultiAgentTurnRepo,
     SqliteConversationSummaryRepo,
+    SqliteMultiAgentWorkspaceRepo, SqliteMultiAgentAttachmentRepo,
 )
 from ..rag.storage import create_storage
 from ..rag.parsing import (
@@ -108,6 +112,8 @@ async def lifespan(app: FastAPI):
         session_message_repo = SqliteSessionMessageRepo(sqlite_db)
         multi_agent_turn_repo = SqliteMultiAgentTurnRepo(sqlite_db)
         conversation_summary_repo = SqliteConversationSummaryRepo(sqlite_db)
+        multi_agent_workspace_repo = SqliteMultiAgentWorkspaceRepo(sqlite_db)
+        multi_agent_attachment_repo = SqliteMultiAgentAttachmentRepo(sqlite_db)
         logger.info("存储后端: SQLite → %s", sqlite_db.db_path)
     else:
         user_repo = InMemoryUserRepo()
@@ -120,6 +126,8 @@ async def lifespan(app: FastAPI):
         session_message_repo = InMemorySessionMessageRepo()
         multi_agent_turn_repo = InMemoryMultiAgentTurnRepo()
         conversation_summary_repo = InMemoryConversationSummaryRepo()
+        multi_agent_workspace_repo = InMemoryMultiAgentWorkspaceRepo()
+        multi_agent_attachment_repo = InMemoryMultiAgentAttachmentRepo()
         logger.info("存储后端: 内存 (REPOSITORY_BACKEND=memory)")
 
     # ── Auth ──
@@ -129,6 +137,25 @@ async def lifespan(app: FastAPI):
     )
 
     session_service = SessionService(session_repo=session_repo)
+
+    workspace_roots = [
+        item.strip() for item in os.getenv(
+            "MULTI_AGENT_WORKSPACE_ROOTS", os.getcwd(),
+        ).split(os.pathsep) if item.strip()
+    ]
+    multi_agent_workspace_service = MultiAgentWorkspaceService(
+        workspace_repo=multi_agent_workspace_repo,
+        attachment_repo=multi_agent_attachment_repo,
+        session_service=session_service,
+        storage_dir=os.getenv(
+            "MULTI_AGENT_ATTACHMENT_DIR",
+            os.path.join(os.getcwd(), "storage", "multi_agent_attachments"),
+        ),
+        allowed_roots=workspace_roots,
+        max_attachment_bytes=(
+            int(os.getenv("MULTI_AGENT_ATTACHMENT_MAX_MB", "50")) * 1024 * 1024
+        ),
+    )
 
     # ── 可热切换的运行时配置 ──
     storage_sqlite_dir = os.getenv(
@@ -226,6 +253,7 @@ async def lifespan(app: FastAPI):
         turn_repo=multi_agent_turn_repo,
         summary_repo=conversation_summary_repo,
         session_service=session_service,
+        workspace_service=multi_agent_workspace_service,
         max_context_tokens=int(os.getenv("MULTI_AGENT_CONTEXT_MAX_TOKENS", "6000")),
         max_history_turns=int(os.getenv("MULTI_AGENT_MAX_HISTORY_TURNS", "10")),
     )
@@ -323,6 +351,7 @@ async def lifespan(app: FastAPI):
     app.state.embedding = embedding
     app.state.milvus = milvus
     app.state.multi_agent_service = multi_agent_service
+    app.state.multi_agent_workspace_service = multi_agent_workspace_service
     app.state.runtime_config_service = runtime_config_service
     app.state.mcp_tools = runtime_config_service.mcp_tools
     app.state.sqlite_db = sqlite_db

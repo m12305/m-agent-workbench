@@ -26,9 +26,12 @@ def json_schema_to_pydantic(schema: dict, name: str) -> type[BaseModel]:
         t = prop.get("type")
         if t == "object" and "properties" in prop:
             py = json_schema_to_pydantic(prop, f"{name}_{key}")
-        elif t == "array" and isinstance(prop.get("items"), dict) \
-                and prop["items"].get("type") == "object":
-            item = json_schema_to_pydantic(prop["items"], f"{name}_{key}Item")
+        elif t == "array" and isinstance(prop.get("items"), dict):
+            item_schema = prop["items"]
+            if item_schema.get("type") == "object":
+                item = json_schema_to_pydantic(item_schema, f"{name}_{key}Item")
+            else:
+                item = _TYPE_MAP.get(item_schema.get("type"), Any)
             py = list[item]
         elif "enum" in prop:
             enum_vals = tuple(prop["enum"])
@@ -56,7 +59,10 @@ def to_langchain_tool(conn, mcp_tool) -> BaseTool:
     args_model = json_schema_to_pydantic(mcp_tool.input_schema or {}, model_name)
 
     async def _arun(**kwargs) -> str:
-        return await conn.call(mcp_tool.name, kwargs)
+        # Pydantic includes omitted optional fields as ``None``. MCP JSON Schema
+        # treats an optional string as either absent or a string, never null.
+        clean_kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        return await conn.call(mcp_tool.name, clean_kwargs)
 
     return StructuredTool(
         name=full_name,

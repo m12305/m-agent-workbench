@@ -8,11 +8,21 @@
 ===========================================================================
 """
 
+from contextvars import ContextVar, Token
 from enum import StrEnum
+from typing import Awaitable, Callable
 
 
 class AgentRunCancelled(Exception):
     """Raised inside graph nodes when the client cancels a run."""
+
+
+class SubAgentExecutionError(RuntimeError):
+    """A tool-backed SubAgent step failed before it produced usable output."""
+
+    def __init__(self, message: str, *, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class MultiAgentEvent(StrEnum):
@@ -56,6 +66,38 @@ class MultiAgentEvent(StrEnum):
     # ── 错误 ──
     ERROR = "error"                     # 错误, data={code, message, agent}
     CANCELLED = "cancelled"             # 当前轮次已中止
+
+
+AgentEventSink = Callable[[dict], Awaitable[None]]
+_agent_event_sink: ContextVar[AgentEventSink | None] = ContextVar(
+    "multi_agent_event_sink", default=None,
+)
+
+
+def set_agent_event_sink(sink: AgentEventSink) -> Token:
+    """Bind an event sink to the current async run and its child tasks."""
+    return _agent_event_sink.set(sink)
+
+
+def reset_agent_event_sink(token: Token) -> None:
+    """Restore the event sink that was active before the current run."""
+    _agent_event_sink.reset(token)
+
+
+async def emit_agent_event(
+    event: MultiAgentEvent | str,
+    data: dict | None = None,
+) -> None:
+    """Forward an execution event when the caller is inside a streamed run.
+
+    A ContextVar keeps concurrent sessions isolated while allowing nested
+    SubAgent graphs and tool nodes to publish into the MainAgent stream.
+    Non-streaming ``arun`` calls intentionally ignore these notifications.
+    """
+    sink = _agent_event_sink.get()
+    if sink is None:
+        return
+    await sink({"event": str(event), "data": data or {}})
 
 
 # ── 事件元数据 (API 文档用) ──

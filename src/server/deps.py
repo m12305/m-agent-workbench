@@ -49,6 +49,11 @@ def get_multi_agent_service(request: Request):
     return request.app.state.multi_agent_service
 
 
+def get_multi_agent_workspace_service(request: Request):
+    """获取 Multi-Agent 会话工作区与附件服务。"""
+    return request.app.state.multi_agent_workspace_service
+
+
 def get_runtime_config_service(request: Request):
     """获取运行时配置服务。"""
     return request.app.state.runtime_config_service

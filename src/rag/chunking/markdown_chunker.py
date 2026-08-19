@@ -1,7 +1,6 @@
 """MarkdownChunker — 按 ## 标题切节，同级下按段落细分"""
 
-import tiktoken
-from .base import ChunkingStrategy, Chunk
+from .base import ChunkingStrategy, Chunk, get_token_encoder
 from ..parsing.base import ParsedDocument
 
 MAX_TOKENS = 512
@@ -14,7 +13,7 @@ class MarkdownChunker:
         return "markdown"
 
     def chunk(self, parsed: ParsedDocument, document_id: str) -> list[Chunk]:
-        enc = tiktoken.get_encoding("cl100k_base")
+        enc = get_token_encoder()
         sections_text = parsed.text.split("\n## ")
 
         chunks = []

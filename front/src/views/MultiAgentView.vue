@@ -122,6 +122,63 @@
         </div>
       </header>
 
+      <section class="ma-resource-bar" aria-label="会话工作区与附件">
+        <div class="ma-workspace-picker">
+          <FolderOpen :size="18" aria-hidden="true" />
+          <label for="ma-workspace-path">工作区</label>
+          <input
+            id="ma-workspace-path"
+            v-model.trim="workspacePath"
+            list="ma-workspace-roots"
+            type="text"
+            :disabled="running || workspaceLocked"
+            placeholder="输入后端可访问的文件夹路径"
+          />
+          <datalist id="ma-workspace-roots">
+            <option v-for="root in workspaceRoots" :key="root" :value="root" />
+          </datalist>
+          <select
+            v-model="workspacePermission"
+            :disabled="running || workspaceLocked"
+            aria-label="工作区权限"
+          >
+            <option value="read_only">只读</option>
+            <option value="read_write">可读写</option>
+          </select>
+        </div>
+        <div class="ma-resource-actions">
+          <span v-if="workspaceError" class="ma-resource-error">{{ workspaceError }}</span>
+          <span v-else-if="workspaceLocked" class="ma-resource-note">
+            当前会话已锁定此工作区 · {{ sessionAttachments.length }} 个文件
+          </span>
+          <span v-else class="ma-resource-note">附件始终只读，PDF/Office 暂不解析</span>
+          <button
+            class="ma-attach-button"
+            type="button"
+            :disabled="running || attachmentUploading || !workspacePath.trim()"
+            @click="openAttachmentPicker"
+          >
+            <CircleNotch v-if="attachmentUploading" class="ma-spinning" :size="15" aria-hidden="true" />
+            <Paperclip v-else :size="16" aria-hidden="true" />
+            添加文件
+          </button>
+          <input ref="attachmentInput" class="sr-only" type="file" multiple @change="onFilesSelected" />
+        </div>
+        <div v-if="pendingAttachmentViews.length" class="ma-attachment-list" aria-label="本轮附件">
+          <span v-for="item in pendingAttachmentViews" :key="item.id" class="ma-attachment-chip">
+            <ImageIcon v-if="item.kind === 'image'" :size="15" aria-hidden="true" />
+            <FileIcon v-else :size="15" aria-hidden="true" />
+            <span>
+              <strong>{{ item.filename }}</strong>
+              <small>{{ attachmentKindLabel(item.kind) }} · {{ formatFileSize(item.fileSize) }}</small>
+            </span>
+            <button type="button" :disabled="running" aria-label="移除附件" @click="removePendingAttachment(item.id)">
+              <X :size="13" aria-hidden="true" />
+            </button>
+          </span>
+        </div>
+      </section>
+
       <div ref="outputPanel" class="ma-output" @scroll="handleOutputScroll">
         <section v-if="!hasRun" class="ma-empty">
           <div class="ma-empty-copy">
@@ -157,6 +214,11 @@
               <span class="ma-conversation-role">{{ message.role === 'user' ? '你' : 'Multi-Agent' }}</span>
               <p v-if="message.role === 'user'">{{ message.content }}</p>
               <div v-else class="message-markdown" v-html="renderConversationMessage(message.content)"></div>
+              <div v-if="messageAttachments(message).length" class="ma-message-attachments">
+                <span v-for="attachment in messageAttachments(message)" :key="attachment.attachment_id">
+                  <Paperclip :size="12" aria-hidden="true" />{{ attachment.filename }}
+                </span>
+              </div>
               <small v-if="message.status === 'cancelled'">该轮已中止</small>
               <small v-else-if="message.status === 'failed'">该轮执行失败</small>
             </article>
@@ -288,6 +350,7 @@
             @focus="composerFocused = true"
             @blur="composerFocused = false"
             @keydown="handleComposerKeydown"
+            @paste="handleComposerPaste"
           ></textarea>
           <div class="ma-composer-tools">
             <span class="ma-composer-hint">Enter 运行，Shift+Enter 换行</span>
@@ -296,7 +359,7 @@
               <Stop :size="16" weight="fill" aria-hidden="true" />
               停止
             </button>
-            <button v-else class="ma-submit-button" type="submit" :disabled="!taskInput.trim()">
+            <button v-else class="ma-submit-button" type="submit" :disabled="!taskInput.trim() || !workspacePath.trim() || attachmentUploading">
               <PaperPlaneTilt :size="17" weight="bold" aria-hidden="true" />
               发送
             </button>
@@ -328,9 +391,13 @@ import {
   PhCircleNotch as CircleNotch,
   PhClockCounterClockwise as ClockCounterClockwise,
   PhCopy as Copy,
+  PhFile as FileIcon,
+  PhFolderOpen as FolderOpen,
   PhGitBranch as GitBranch,
   PhGraph as GraphIcon,
+  PhImage as ImageIcon,
   PhListChecks as ListChecks,
+  PhPaperclip as Paperclip,
   PhPaperPlaneTilt as PaperPlaneTilt,
   PhPlus as Plus,
   PhRobot as Robot,
@@ -341,11 +408,19 @@ import {
   PhTrash as Trash,
   PhWarningCircle as WarningCircle,
   PhWrench as Wrench,
+  PhX as X,
 } from '@phosphor-icons/vue'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { api, getSavedApiBase, STORAGE_KEYS } from '../api/client'
-import type { Message, Session } from '../types/api'
+import type {
+  Message,
+  MultiAgentAttachment,
+  MultiAgentAttachmentKind,
+  MultiAgentWorkspace,
+  Session,
+  WorkspacePermission,
+} from '../types/api'
 import ConfirmDialog from '../components/feedback/ConfirmDialog.vue'
 
 marked.setOptions({ breaks: true, gfm: true })
@@ -361,6 +436,19 @@ interface PlanStepView {
   stepId: string
   description: string
   subagentType: string
+}
+
+interface StagedAttachment {
+  id: string
+  file: File
+  source: 'file_picker' | 'clipboard'
+}
+
+interface AttachmentView {
+  id: string
+  filename: string
+  fileSize: number
+  kind: MultiAgentAttachmentKind
 }
 
 type StageState = 'idle' | 'active' | 'complete' | 'error' | 'stopped'
@@ -410,10 +498,35 @@ const sessionsError = ref('')
 const loadingSessionId = ref('')
 const sessionToDelete = ref<Session | null>(null)
 const deleting = ref(false)
+const workspaceRoots = ref<string[]>([])
+const workspacePath = ref('')
+const workspacePermission = ref<WorkspacePermission>('read_only')
+const workspaceRecord = ref<MultiAgentWorkspace | null>(null)
+const workspaceError = ref('')
+const attachmentInput = ref<HTMLInputElement | null>(null)
+const stagedAttachments = ref<StagedAttachment[]>([])
+const pendingAttachments = ref<MultiAgentAttachment[]>([])
+const sessionAttachments = ref<MultiAgentAttachment[]>([])
+const attachmentUploading = ref(false)
 let eventSequence = 0
 let copyTimer: number | undefined
 
 const hasRun = computed(() => conversationMessages.value.length > 0 || Boolean(currentTask.value) || events.value.length > 0)
+const workspaceLocked = computed(() => Boolean(activeSessionId.value && workspaceRecord.value))
+const pendingAttachmentViews = computed<AttachmentView[]>(() => [
+  ...stagedAttachments.value.map((item) => ({
+    id: item.id,
+    filename: item.file.name,
+    fileSize: item.file.size,
+    kind: inferAttachmentKind(item.file.name, item.file.type),
+  })),
+  ...pendingAttachments.value.map((item) => ({
+    id: item.attachment_id,
+    filename: item.filename,
+    fileSize: item.file_size,
+    kind: item.kind,
+  })),
+])
 const historicalMessages = computed(() => (
   activeTurnId.value
     ? conversationMessages.value.filter((message) => message.turn_id !== activeTurnId.value)
@@ -610,6 +723,8 @@ function planSteps(event: RunEvent): PlanStepView[] {
 function formatAgent(value: string): string {
   if (!value || value === 'main') return '主智能体'
   if (value === 'general_assistant') return '通用助手'
+  if (value === 'workspace_file_agent') return '工作区文件助手'
+  if (value === 'vision_agent') return '视觉助手'
   return value.replaceAll('_', ' ')
 }
 
@@ -661,6 +776,162 @@ function scrollToBottom(force = false) {
   })
 }
 
+function inferAttachmentKind(filename: string, mimeType: string): MultiAgentAttachmentKind {
+  const extension = filename.toLocaleLowerCase().match(/\.[^.]+$/)?.[0] || ''
+  if (mimeType.startsWith('image/') || ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff'].includes(extension)) return 'image'
+  if (['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'].includes(extension)) return 'pdf_office_unparsed'
+  if (mimeType.startsWith('text/') || [
+    '.txt', '.md', '.markdown', '.csv', '.tsv', '.json', '.jsonl', '.yaml', '.yml',
+    '.xml', '.html', '.css', '.js', '.ts', '.tsx', '.jsx', '.vue', '.py', '.java',
+    '.go', '.rs', '.c', '.h', '.cpp', '.hpp', '.cs', '.php', '.rb', '.sh', '.ps1',
+    '.sql', '.toml', '.ini', '.cfg', '.conf', '.log', '.env',
+  ].includes(extension)) return 'text'
+  return 'binary'
+}
+
+function attachmentKindLabel(kind: MultiAgentAttachmentKind): string {
+  if (kind === 'image') return '图片'
+  if (kind === 'text') return '可读取文本'
+  if (kind === 'pdf_office_unparsed') return '暂不解析内容'
+  return '文件'
+}
+
+function formatFileSize(size: number): string {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
+}
+
+function messageAttachments(message: Message): Array<{ attachment_id: string; filename: string }> {
+  const value = message.metadata?.attachments
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const record = item as Record<string, unknown>
+    if (typeof record.attachment_id !== 'string' || typeof record.filename !== 'string') return []
+    return [{ attachment_id: record.attachment_id, filename: record.filename }]
+  })
+}
+
+async function loadWorkspaceRoots() {
+  try {
+    const response = await api.listMultiAgentWorkspaceRoots()
+    workspaceRoots.value = response.roots
+    if (!workspacePath.value && response.roots.length) workspacePath.value = response.roots[0] || ''
+  } catch (error) {
+    workspaceError.value = error instanceof Error ? error.message : '无法加载工作区范围'
+  }
+}
+
+function openAttachmentPicker() {
+  attachmentInput.value?.click()
+}
+
+function onFilesSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  void addAttachmentFiles(Array.from(input.files || []), 'file_picker')
+  input.value = ''
+}
+
+function handleComposerPaste(event: ClipboardEvent) {
+  const images = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/'))
+  if (!images.length) return
+  event.preventDefault()
+  const normalized = images.map((file, index) => {
+    const extension = file.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
+    return new File([file], `pasted-${Date.now()}-${index + 1}.${extension}`, { type: file.type })
+  })
+  void addAttachmentFiles(normalized, 'clipboard')
+}
+
+async function addAttachmentFiles(files: File[], source: 'file_picker' | 'clipboard') {
+  const usable = files.filter((file) => file.size > 0)
+  if (!usable.length) return
+  workspaceError.value = ''
+  if (!activeSessionId.value || !workspaceRecord.value) {
+    stagedAttachments.value.push(...usable.map((file) => ({
+      id: `${Date.now()}-${crypto.randomUUID()}`,
+      file,
+      source,
+    })))
+    return
+  }
+
+  attachmentUploading.value = true
+  try {
+    for (const file of usable) {
+      const attachment = await api.uploadMultiAgentAttachment(
+        activeSessionId.value, file, source,
+      )
+      pendingAttachments.value.push(attachment)
+      sessionAttachments.value.push(attachment)
+    }
+  } catch (error) {
+    workspaceError.value = error instanceof Error ? error.message : '附件上传失败'
+  } finally {
+    attachmentUploading.value = false
+  }
+}
+
+async function removePendingAttachment(id: string) {
+  const stagedIndex = stagedAttachments.value.findIndex((item) => item.id === id)
+  if (stagedIndex >= 0) {
+    stagedAttachments.value.splice(stagedIndex, 1)
+    return
+  }
+  const attachment = pendingAttachments.value.find((item) => item.attachment_id === id)
+  if (!attachment || !activeSessionId.value) return
+  try {
+    await api.deleteMultiAgentAttachment(activeSessionId.value, attachment.attachment_id)
+    pendingAttachments.value = pendingAttachments.value.filter((item) => item.attachment_id !== id)
+    sessionAttachments.value = sessionAttachments.value.filter((item) => item.attachment_id !== id)
+  } catch (error) {
+    workspaceError.value = error instanceof Error ? error.message : '附件移除失败'
+  }
+}
+
+async function ensureSessionWorkspace(query: string): Promise<string> {
+  if (!workspacePath.value.trim()) throw new Error('请先选择工作区文件夹')
+  if (activeSessionId.value && workspaceRecord.value) return activeSessionId.value
+
+  let sessionId = activeSessionId.value
+  let created = false
+  if (!sessionId) {
+    const session = await api.createSession(query.slice(0, 50), 'multi_agent')
+    sessionId = session.session_id
+    created = true
+  }
+  try {
+    workspaceRecord.value = await api.configureMultiAgentWorkspace(
+      sessionId, workspacePath.value, workspacePermission.value,
+    )
+    activeSessionId.value = sessionId
+    return sessionId
+  } catch (error) {
+    if (created) {
+      try { await api.deleteSession(sessionId) } catch { /* best effort */ }
+    }
+    throw error
+  }
+}
+
+async function uploadStagedAttachments(sessionId: string) {
+  if (!stagedAttachments.value.length) return
+  attachmentUploading.value = true
+  try {
+    for (const item of stagedAttachments.value) {
+      const attachment = await api.uploadMultiAgentAttachment(
+        sessionId, item.file, item.source,
+      )
+      pendingAttachments.value.push(attachment)
+      sessionAttachments.value.push(attachment)
+    }
+    stagedAttachments.value = []
+  } finally {
+    attachmentUploading.value = false
+  }
+}
+
 function choosePrompt(value: string) {
   taskInput.value = value
   nextTick(() => composerInput.value?.focus())
@@ -674,11 +945,25 @@ function handleComposerKeydown(event: KeyboardEvent) {
 
 function resetRun() {
   if (running.value) stopRun()
+  const sessionId = activeSessionId.value
+  const pendingIds = pendingAttachments.value.map((item) => item.attachment_id)
+  if (sessionId && pendingIds.length) {
+    void Promise.allSettled(
+      pendingIds.map((id) => api.deleteMultiAgentAttachment(sessionId, id)),
+    )
+  }
   events.value = []
   currentTask.value = ''
   activeSessionId.value = ''
   activeTurnId.value = ''
   conversationMessages.value = []
+  workspaceRecord.value = null
+  workspacePermission.value = 'read_only'
+  workspaceError.value = ''
+  stagedAttachments.value = []
+  pendingAttachments.value = []
+  sessionAttachments.value = []
+  workspacePath.value = workspaceRoots.value[0] || ''
   shouldAutoScroll.value = true
   nextTick(() => composerInput.value?.focus())
 }
@@ -736,9 +1021,26 @@ async function loadHistoricalSession(session: Session) {
   events.value = []
   activeTurnId.value = ''
   currentTask.value = ''
+  workspaceError.value = ''
+  stagedAttachments.value = []
+  pendingAttachments.value = []
   runStartedAt.value = new Date(session.created_at).getTime() || Date.now()
   try {
-    conversationMessages.value = await api.getMessages(session.session_id)
+    const [messages, workspace, attachments] = await Promise.all([
+      api.getMessages(session.session_id),
+      api.getMultiAgentWorkspace(session.session_id),
+      api.listMultiAgentAttachments(session.session_id),
+    ])
+    conversationMessages.value = messages
+    workspaceRecord.value = workspace
+    sessionAttachments.value = attachments
+    if (workspace) {
+      workspacePath.value = workspace.root_path
+      workspacePermission.value = workspace.permission
+    } else {
+      workspacePath.value = workspaceRoots.value[0] || ''
+      workspacePermission.value = 'read_only'
+    }
     scrollToBottom(true)
   } catch (error) {
     pushEvent('error', {
@@ -800,17 +1102,21 @@ async function submitTask() {
   const apiKey = localStorage.getItem(STORAGE_KEYS.apiKey)
   if (apiKey) headers.set('Authorization', `Bearer ${apiKey}`)
 
+  let requestStarted = false
   try {
+    const sessionId = await ensureSessionWorkspace(query)
+    await uploadStagedAttachments(sessionId)
+    const attachmentIds = pendingAttachments.value.map((item) => item.attachment_id)
     const response = await fetch(`${getSavedApiBase()}/multi-agent/chat/stream`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         query,
-        session_id: activeSessionId.value || null,
+        session_id: sessionId,
+        attachment_ids: attachmentIds,
       }),
       signal: controller.signal,
     })
-
     if (!response.ok) {
       if (response.status === 401) window.dispatchEvent(new Event('mka:unauthorized'))
       let message = `${response.status} ${response.statusText}`.trim()
@@ -823,6 +1129,7 @@ async function submitTask() {
       throw new Error(message || '请求失败')
     }
     if (!response.body) throw new Error('浏览器未提供流式响应内容')
+    requestStarted = true
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
@@ -887,6 +1194,10 @@ async function submitTask() {
       pushEvent('error', { message: error instanceof Error ? error.message : '无法连接到多智能体服务' })
     }
   } finally {
+    if (requestStarted) {
+      stagedAttachments.value = []
+      pendingAttachments.value = []
+    }
     if (activeController.value === controller) activeController.value = null
     running.value = false
     if (activeSessionId.value) {
@@ -906,6 +1217,7 @@ function renderConversationMessage(content: string): string {
 }
 
 onMounted(() => {
+  void loadWorkspaceRoots()
   void loadMultiAgentSessions(false)
 })
 
@@ -1059,7 +1371,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: 72px minmax(0, 1fr) auto;
+  grid-template-rows: 72px auto minmax(0, 1fr) auto;
   overflow: hidden;
 }
 
@@ -1125,6 +1437,42 @@ onBeforeUnmount(() => {
 .ma-runtime-status.is-stopped { background: var(--warning-soft); color: var(--warning); }
 .ma-spinning { animation: ma-spin 0.9s linear infinite; }
 @keyframes ma-spin { to { transform: rotate(360deg); } }
+
+.ma-resource-bar {
+  padding: 9px clamp(20px, 3vw, 36px) 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+.ma-workspace-picker { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.ma-workspace-picker > svg { flex: 0 0 auto; color: var(--accent); }
+.ma-workspace-picker label { color: var(--text-soft); font-size: 0.66rem; font-weight: 720; }
+.ma-workspace-picker input { min-width: 120px; flex: 1; }
+.ma-workspace-picker input,
+.ma-workspace-picker select { height: 33px; padding: 0 9px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font-size: 0.67rem; outline: none; }
+.ma-workspace-picker input:focus,
+.ma-workspace-picker select:focus { border-color: var(--accent); }
+.ma-workspace-picker input:disabled,
+.ma-workspace-picker select:disabled { opacity: 0.72; cursor: not-allowed; }
+.ma-workspace-picker select { flex: 0 0 auto; }
+.ma-resource-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.ma-resource-note,
+.ma-resource-error { max-width: 310px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.61rem; }
+.ma-resource-note { color: var(--text-muted); }
+.ma-resource-error { color: var(--danger); }
+.ma-attach-button { min-height: 33px; padding: 0 10px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-soft); font-size: 0.66rem; font-weight: 700; cursor: pointer; }
+.ma-attach-button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.ma-attach-button:disabled { opacity: 0.48; cursor: not-allowed; }
+.ma-attachment-list { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 7px; }
+.ma-attachment-chip { max-width: 290px; min-height: 37px; padding: 5px 6px 5px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--text-soft); }
+.ma-attachment-chip > svg { flex: 0 0 auto; color: var(--accent); }
+.ma-attachment-chip > span { min-width: 0; display: grid; gap: 1px; }
+.ma-attachment-chip strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.64rem; }
+.ma-attachment-chip small { color: var(--text-muted); font-size: 0.55rem; }
+.ma-attachment-chip button { width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.ma-attachment-chip button:hover { background: var(--surface-hover); color: var(--danger); }
 
 .ma-output {
   min-height: 0;
@@ -1205,6 +1553,8 @@ onBeforeUnmount(() => {
 .ma-conversation-role { color: var(--text-muted); font-size: 0.61rem; font-weight: 750; }
 .ma-conversation-message > p { color: var(--text); font-size: 0.79rem; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ma-conversation-message > small { color: var(--warning); font-size: 0.62rem; font-weight: 680; }
+.ma-message-attachments { display: flex; flex-wrap: wrap; gap: 5px; }
+.ma-message-attachments span { padding: 4px 7px; display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; background: var(--surface); color: var(--text-muted); font-size: 0.58rem; }
 
 .ma-user-brief {
   width: min(100%, 1180px);
@@ -1368,6 +1718,8 @@ onBeforeUnmount(() => {
   .ma-product-name { display: none; }
   .ma-agent-intro h1 { margin-top: 0; font-size: 0.82rem; }
   .ma-header { padding: 0 15px; }
+  .ma-resource-bar { padding-inline: 14px; grid-template-columns: 1fr; }
+  .ma-resource-actions { justify-content: space-between; }
   .ma-output { padding: 18px 14px; }
   .ma-composer-wrap { padding: 9px 11px 10px; }
 }
@@ -1378,6 +1730,9 @@ onBeforeUnmount(() => {
   .ma-stage-copy strong { font-size: 0.59rem; }
   .ma-header p { display: none; }
   .ma-header h2 { font-size: 0.86rem; }
+  .ma-workspace-picker { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; }
+  .ma-workspace-picker label { display: none; }
+  .ma-resource-note, .ma-resource-error { display: none; }
   .ma-empty { grid-template-columns: 1fr; align-content: start; gap: 30px; padding: 28px 2px 48px; }
   .ma-empty-mark { width: 52px; height: 52px; margin-bottom: 19px; }
   .ma-empty h2 { font-size: clamp(1.85rem, 9vw, 2.55rem); }

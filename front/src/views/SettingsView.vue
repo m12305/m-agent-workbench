@@ -205,7 +205,8 @@
           </div>
           <div class="field-group">
             <label for="mcp-subagents">可用子智能体</label>
-            <input id="mcp-subagents" v-model.trim="mcpDraft.subagentsText" placeholder="* 或 general_assistant" />
+            <input id="mcp-subagents" v-model.trim="mcpDraft.subagentsText" placeholder="如 workspace_file_agent 或 vision_agent" />
+            <small>文件和视觉 MCP 必须明确指定对应子智能体；使用 * 不会授予会话文件权限。</small>
           </div>
           <div class="field-group settings-span-2">
             <label for="mcp-tools">允许的工具</label>

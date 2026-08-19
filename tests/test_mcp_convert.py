@@ -79,3 +79,30 @@ def test_to_langchain_tool_namespace_and_invoke():
     assert lt.name == "knowledge_search"          # 下划线命名空间，满足模型名约束
     result = asyncio.run(lt.ainvoke({"q": "x"}))
     assert result == "hit"
+
+
+def test_to_langchain_tool_omits_optional_none_arguments():
+    connection = _FakeConn()
+    mcp_tool = Tool(
+        name="analyze_image",
+        description="分析图片",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "image_path": {"type": "string"},
+                "prompt": {"type": "string"},
+            },
+            "required": ["image_path"],
+        },
+    )
+    langchain_tool = to_langchain_tool(connection, mcp_tool)
+
+    result = asyncio.run(langchain_tool.ainvoke({
+        "image_path": "picture.png",
+        "prompt": None,
+    }))
+
+    assert result == "hit"
+    assert connection.calls == [
+        ("analyze_image", {"image_path": "picture.png"}),
+    ]

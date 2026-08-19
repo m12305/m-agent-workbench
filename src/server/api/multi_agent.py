@@ -22,11 +22,14 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from ..deps import get_identity, get_session_service
-from ..exceptions import NotFoundError
+from ..deps import (
+    get_identity, get_multi_agent_workspace_service, get_session_service,
+)
+from ..exceptions import AppError, NotFoundError
 from ..repositories.base import Identity
 from ..services.multi_agent_service import MultiAgentService
 from ..services.session_service import SessionService
+from ..services.multi_agent_workspace_service import MultiAgentWorkspaceService
 
 logger = logging.getLogger("server.api.multi_agent")
 
@@ -45,7 +48,12 @@ class MultiAgentRequest(BaseModel):
     )
     session_id: str | None = Field(
         default=None,
-        description="会话 ID (不传则自动创建新会话)",
+        description="已选择工作区的 Multi-Agent 会话 ID",
+    )
+    attachment_ids: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="本轮消息引用的会话附件 ID",
     )
 
 
@@ -69,6 +77,9 @@ async def multi_agent_chat_stream(
     identity: Identity = Depends(get_identity),
     multi_agent_service: MultiAgentService = Depends(get_multi_agent_service),
     session_service: SessionService = Depends(get_session_service),
+    workspace_service: MultiAgentWorkspaceService = Depends(
+        get_multi_agent_workspace_service,
+    ),
 ):
     """多智能体 SSE 流式问答
 
@@ -81,17 +92,16 @@ async def multi_agent_chat_stream(
     """
     # 创建或验证会话
     session_id = body.session_id
-    if session_id:
-        await session_service.require_session(
-            identity.user_id, session_id, "multi_agent",
+    if not session_id:
+        raise AppError(
+            code="WORKSPACE_REQUIRED",
+            message="请先创建 Multi-Agent 会话并选择工作区",
+            status_code=409,
         )
-    else:
-        session = await session_service.create_session(
-            user_id=identity.user_id,
-            session_type="multi_agent",
-            title=body.query[:50],
-        )
-        session_id = session.session_id
+    await session_service.require_session(
+        identity.user_id, session_id, "multi_agent",
+    )
+    await workspace_service.require_workspace(identity.user_id, session_id)
 
     async def event_generator():
         # 开始事件
@@ -106,6 +116,7 @@ async def multi_agent_chat_stream(
                 user_id=identity.user_id,
                 session_id=session_id,
                 query=body.query,
+                attachment_ids=body.attachment_ids,
             ):
                 if await request.is_disconnected():
                     multi_agent_service.cancel_run(

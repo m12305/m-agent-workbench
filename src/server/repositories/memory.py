@@ -18,6 +18,8 @@ from .base import (
     SessionMessage,
     MultiAgentTurn,
     ConversationSummary,
+    MultiAgentWorkspace,
+    MultiAgentAttachment,
 )
 
 class InMemoryUserRepo:
@@ -206,6 +208,69 @@ class InMemoryConversationSummaryRepo:
     async def delete(self, session_id: str) -> None:
         async with self._lock:
             self._summaries.pop(session_id, None)
+
+
+class InMemoryMultiAgentWorkspaceRepo:
+    def __init__(self):
+        self._workspaces: dict[str, MultiAgentWorkspace] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, session_id: str) -> MultiAgentWorkspace | None:
+        return self._workspaces.get(session_id)
+
+    async def upsert(self, workspace: MultiAgentWorkspace) -> MultiAgentWorkspace:
+        async with self._lock:
+            existing = self._workspaces.get(workspace.session_id)
+            if existing is not None:
+                workspace.created_at = existing.created_at
+            workspace.updated_at = datetime.utcnow()
+            self._workspaces[workspace.session_id] = workspace
+            return workspace
+
+    async def delete(self, session_id: str) -> None:
+        async with self._lock:
+            self._workspaces.pop(session_id, None)
+
+
+class InMemoryMultiAgentAttachmentRepo:
+    def __init__(self):
+        self._attachments: dict[str, MultiAgentAttachment] = {}
+        self._lock = asyncio.Lock()
+
+    async def create(self, attachment: MultiAgentAttachment) -> MultiAgentAttachment:
+        async with self._lock:
+            self._attachments[attachment.attachment_id] = attachment
+            return attachment
+
+    async def get(self, attachment_id: str) -> MultiAgentAttachment | None:
+        return self._attachments.get(attachment_id)
+
+    async def list_by_session(self, session_id: str) -> list[MultiAgentAttachment]:
+        return sorted(
+            (
+                item for item in self._attachments.values()
+                if item.session_id == session_id
+            ),
+            key=lambda item: (item.created_at, item.attachment_id),
+        )
+
+    async def bind_to_turn(self, attachment_ids: list[str], turn_id: str) -> None:
+        async with self._lock:
+            for attachment_id in attachment_ids:
+                if attachment := self._attachments.get(attachment_id):
+                    if attachment.turn_id is None:
+                        attachment.turn_id = turn_id
+
+    async def delete(self, attachment_id: str) -> None:
+        async with self._lock:
+            self._attachments.pop(attachment_id, None)
+
+    async def delete_by_session(self, session_id: str) -> None:
+        async with self._lock:
+            self._attachments = {
+                key: value for key, value in self._attachments.items()
+                if value.session_id != session_id
+            }
 
 
 # ═══════════════════════════════════════════════════════════════

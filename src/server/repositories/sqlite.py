@@ -22,6 +22,7 @@ from .base import (
     User, ApiKey, Session, SessionType, Identity,
     Document, ChunkRecord, TaskRecord, RuntimeConfigRecord,
     SessionMessage, MultiAgentTurn, ConversationSummary,
+    MultiAgentWorkspace, MultiAgentAttachment,
 )
 
 logger = logging.getLogger("server.sqlite_repos")
@@ -325,6 +326,39 @@ CREATE TABLE IF NOT EXISTS conversation_summaries (
     updated_at             TEXT NOT NULL,
     FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS multi_agent_workspaces (
+    session_id   TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL,
+    root_path    TEXT NOT NULL,
+    permission   TEXT NOT NULL DEFAULT 'read_only'
+                 CHECK(permission IN ('read_only', 'read_write')),
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS multi_agent_attachments (
+    attachment_id TEXT PRIMARY KEY,
+    session_id    TEXT NOT NULL,
+    user_id       TEXT NOT NULL,
+    turn_id       TEXT,
+    filename      TEXT NOT NULL,
+    storage_path  TEXT NOT NULL,
+    mime_type     TEXT NOT NULL,
+    file_size     INTEGER NOT NULL,
+    file_hash     TEXT NOT NULL,
+    source        TEXT NOT NULL DEFAULT 'file_picker'
+                  CHECK(source IN ('file_picker', 'clipboard')),
+    created_at    TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_multi_agent_attachments_session_created
+ON multi_agent_attachments(session_id, created_at, attachment_id);
+
+CREATE INDEX IF NOT EXISTS idx_multi_agent_attachments_turn
+ON multi_agent_attachments(turn_id);
 
 CREATE TABLE IF NOT EXISTS documents (
     document_id   TEXT PRIMARY KEY,
@@ -836,6 +870,122 @@ class SqliteConversationSummaryRepo:
     async def delete(self, session_id: str) -> None:
         await self._db.execute(
             "DELETE FROM conversation_summaries WHERE session_id = ?", (session_id,),
+        )
+
+
+class SqliteMultiAgentWorkspaceRepo:
+    def __init__(self, db: SqliteDb):
+        self._db = db
+
+    async def get(self, session_id: str) -> MultiAgentWorkspace | None:
+        row = await self._db.fetchone(
+            "SELECT * FROM multi_agent_workspaces WHERE session_id = ?",
+            (session_id,),
+        )
+        if not row:
+            return None
+        return MultiAgentWorkspace(
+            session_id=row["session_id"],
+            user_id=row["user_id"],
+            root_path=row["root_path"],
+            permission=row["permission"],
+            created_at=_parse_dt(row["created_at"]),
+            updated_at=_parse_dt(row["updated_at"]),
+        )
+
+    async def upsert(self, workspace: MultiAgentWorkspace) -> MultiAgentWorkspace:
+        existing = await self.get(workspace.session_id)
+        created_at = existing.created_at if existing else workspace.created_at
+        updated_at = datetime.utcnow()
+        await self._db.execute(
+            "INSERT INTO multi_agent_workspaces "
+            "(session_id, user_id, root_path, permission, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET "
+            "user_id = excluded.user_id, root_path = excluded.root_path, "
+            "permission = excluded.permission, updated_at = excluded.updated_at",
+            (
+                workspace.session_id, workspace.user_id, workspace.root_path,
+                workspace.permission, created_at.isoformat(), updated_at.isoformat(),
+            ),
+        )
+        return MultiAgentWorkspace(
+            session_id=workspace.session_id,
+            user_id=workspace.user_id,
+            root_path=workspace.root_path,
+            permission=workspace.permission,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
+    async def delete(self, session_id: str) -> None:
+        await self._db.execute(
+            "DELETE FROM multi_agent_workspaces WHERE session_id = ?", (session_id,),
+        )
+
+
+class SqliteMultiAgentAttachmentRepo:
+    def __init__(self, db: SqliteDb):
+        self._db = db
+
+    async def create(self, attachment: MultiAgentAttachment) -> MultiAgentAttachment:
+        await self._db.execute(
+            "INSERT INTO multi_agent_attachments "
+            "(attachment_id, session_id, user_id, turn_id, filename, storage_path, "
+            "mime_type, file_size, file_hash, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                attachment.attachment_id, attachment.session_id, attachment.user_id,
+                attachment.turn_id, attachment.filename, attachment.storage_path,
+                attachment.mime_type, attachment.file_size, attachment.file_hash,
+                attachment.source, attachment.created_at.isoformat(),
+            ),
+        )
+        return attachment
+
+    async def get(self, attachment_id: str) -> MultiAgentAttachment | None:
+        row = await self._db.fetchone(
+            "SELECT * FROM multi_agent_attachments WHERE attachment_id = ?",
+            (attachment_id,),
+        )
+        return self._row_to_attachment(row) if row else None
+
+    async def list_by_session(self, session_id: str) -> list[MultiAgentAttachment]:
+        rows = await self._db.fetchall(
+            "SELECT * FROM multi_agent_attachments WHERE session_id = ? "
+            "ORDER BY created_at, rowid",
+            (session_id,),
+        )
+        return [self._row_to_attachment(row) for row in rows]
+
+    async def bind_to_turn(self, attachment_ids: list[str], turn_id: str) -> None:
+        if not attachment_ids:
+            return
+        await self._db.executemany(
+            "UPDATE multi_agent_attachments SET turn_id = ? "
+            "WHERE attachment_id = ? AND turn_id IS NULL",
+            [(turn_id, attachment_id) for attachment_id in attachment_ids],
+        )
+
+    async def delete(self, attachment_id: str) -> None:
+        await self._db.execute(
+            "DELETE FROM multi_agent_attachments WHERE attachment_id = ?",
+            (attachment_id,),
+        )
+
+    async def delete_by_session(self, session_id: str) -> None:
+        await self._db.execute(
+            "DELETE FROM multi_agent_attachments WHERE session_id = ?", (session_id,),
+        )
+
+    @staticmethod
+    def _row_to_attachment(row: dict) -> MultiAgentAttachment:
+        return MultiAgentAttachment(
+            attachment_id=row["attachment_id"], session_id=row["session_id"],
+            user_id=row["user_id"], turn_id=row["turn_id"],
+            filename=row["filename"], storage_path=row["storage_path"],
+            mime_type=row["mime_type"], file_size=int(row["file_size"]),
+            file_hash=row["file_hash"], source=row["source"],
+            created_at=_parse_dt(row["created_at"]),
         )
 
 

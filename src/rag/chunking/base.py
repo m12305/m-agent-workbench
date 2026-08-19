@@ -2,11 +2,32 @@
 
 import uuid
 import hashlib
+import math
+from functools import lru_cache
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from ..parsing.base import ParsedDocument
+
+
+class _ApproximateEncoder:
+    """Offline fallback used when tiktoken's encoding asset is not cached."""
+
+    @staticmethod
+    def encode(text: str) -> list[int]:
+        cjk = sum(1 for char in text if "\u3400" <= char <= "\u9fff")
+        other = max(0, len(text) - cjk)
+        return [0] * max(1, cjk + math.ceil(other / 4)) if text else []
+
+
+@lru_cache(maxsize=1)
+def get_token_encoder():
+    try:
+        import tiktoken
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        return _ApproximateEncoder()
 
 
 @dataclass

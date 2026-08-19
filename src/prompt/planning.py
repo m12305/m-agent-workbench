@@ -145,11 +145,10 @@ ANALYZE_TASK_PROMPT = """你是一位资深的 AI 任务分析与路由专家。
 - 选择能完成任务的最少子智能体；不要虚构类型。
 - 如果 `needs_subagents=false`，`suggested_subagents` 必须为空数组。
 - 如果 `needs_subagents=true`，至少推荐一个能力匹配的子智能体。
-- 地球、球体、地图、遥感影像的视角定位或移动必须推荐 `remote_sensing`。
 
 ## 判断示例
 
-普通问候应直接处理；查询当前时间应调用具备 `get_current_time` 的子智能体；“视角到合肥”虽然只有一步，也必须调用 `remote_sensing`。
+普通问候应直接处理；查询当前时间应调用具备 `get_current_time` 的子智能体。
 
 ## 用户任务
 

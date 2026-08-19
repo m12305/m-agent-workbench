@@ -15,12 +15,15 @@ import type {
   LlmConfigInput,
   McpConfig,
   McpConfigInput,
+  MultiAgentAttachment,
+  MultiAgentWorkspace,
   ConfigTestResult,
   KnowledgeScope,
   LiveHealth,
   Message,
   ReadyHealth,
   Session,
+  WorkspacePermission,
   StreamEvent,
   User,
 } from '../types/api'
@@ -264,6 +267,38 @@ export const api = {
     { method: 'PATCH', body: jsonBody({ title: title || null }) },
   ),
   deleteSession: (sessionId: string) => request<void>(`/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }),
+  listMultiAgentWorkspaceRoots: () => request<{ roots: string[] }>('/multi-agent/workspace-roots'),
+  getMultiAgentWorkspace: (sessionId: string) => request<MultiAgentWorkspace | null>(
+    `/multi-agent/sessions/${encodeURIComponent(sessionId)}/workspace`,
+  ),
+  configureMultiAgentWorkspace: (
+    sessionId: string,
+    rootPath: string,
+    permission: WorkspacePermission,
+  ) => request<MultiAgentWorkspace>(
+    `/multi-agent/sessions/${encodeURIComponent(sessionId)}/workspace`,
+    { method: 'PUT', body: jsonBody({ root_path: rootPath, permission }) },
+  ),
+  listMultiAgentAttachments: (sessionId: string) => request<MultiAgentAttachment[]>(
+    `/multi-agent/sessions/${encodeURIComponent(sessionId)}/attachments`,
+  ),
+  uploadMultiAgentAttachment: (
+    sessionId: string,
+    file: File,
+    source: 'file_picker' | 'clipboard' = 'file_picker',
+  ) => {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('source', source)
+    return request<MultiAgentAttachment>(
+      `/multi-agent/sessions/${encodeURIComponent(sessionId)}/attachments`,
+      { method: 'POST', body: form },
+    )
+  },
+  deleteMultiAgentAttachment: (sessionId: string, attachmentId: string) => request<void>(
+    `/multi-agent/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    { method: 'DELETE' },
+  ),
 
   chat: (query: string, sessionId: string | null, scope: KnowledgeScope, signal?: AbortSignal) => request<ChatResponse>('/chat', {
     method: 'POST', body: jsonBody({ query, session_id: sessionId, knowledge_scope: scope }), signal,

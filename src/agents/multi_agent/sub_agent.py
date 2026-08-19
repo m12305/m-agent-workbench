@@ -57,7 +57,12 @@ from ...prompt import SUBAGENT_SYSTEM_PROMPT, build_subagent_step_prompt
 # ═══════════════════════════════════════════════════════════════════════
 
 from .states import SubAgentState
-from .events import AgentRunCancelled
+from .events import (
+    AgentRunCancelled,
+    MultiAgentEvent,
+    SubAgentExecutionError,
+    emit_agent_event,
+)
 
 
 GRAPH_RECURSION_LIMIT = 50
@@ -208,8 +213,6 @@ class SubAgent(BaseAgent):
         """
         # 绑定 tools 用于 execute 节点的 ReAct 循环
         tools = self.tool_registry.list_all()
-        model_with_tools = self.model.bind_tools(tools) if tools else self.model
-
         # ── 节点定义 ──
 
         async def plan_node(state: SubAgentState, config: RunnableConfig) -> dict:
@@ -233,11 +236,37 @@ class SubAgent(BaseAgent):
 
             sub_plan = [
                 {"step_id": s.step_id, "description": s.description,
-                 "tool_hint": s.tool_hint}
+                 "tool_hint": self._resolve_tool_hint(s.tool_hint)}
                 for s in response.sub_plan
             ]
+            available_tool_names = set(self.tool_registry.list_names())
+            invalid_hints = [
+                str(step["tool_hint"])
+                for step in sub_plan
+                if step.get("tool_hint")
+                and step["tool_hint"] not in available_tool_names
+            ]
+            if invalid_hints:
+                raise SubAgentExecutionError(
+                    "子智能体计划引用了不可用工具: "
+                    f"{', '.join(invalid_hints)}；"
+                    f"当前可用工具: {', '.join(sorted(available_tool_names)) or '无'}",
+                    retryable=False,
+                )
 
             self.logger.info("Plan: %d steps — %s", len(sub_plan), response.strategy)
+            for index, step in enumerate(sub_plan, 1):
+                self.logger.info(
+                    "Plan step %d/%d: id=%s tool_hint=%s description=%s",
+                    index, len(sub_plan), step["step_id"],
+                    step.get("tool_hint") or "none",
+                    self._log_preview(step.get("description", ""), 240),
+                )
+            await emit_agent_event(MultiAgentEvent.SUBAGENT_PLAN, {
+                "subagent_type": self.subagent_type,
+                "plan": sub_plan,
+                "strategy": response.strategy,
+            })
             return {
                 "sub_plan": sub_plan,
                 "plan_raw": response.strategy,
@@ -253,8 +282,10 @@ class SubAgent(BaseAgent):
             step_idx = state.get("current_step_index", 0)
             sub_plan = state.get("sub_plan", [])
             step_desc = ""
+            tool_hint = None
             if 0 <= step_idx < len(sub_plan):
                 step_desc = sub_plan[step_idx].get("description", "")
+                tool_hint = sub_plan[step_idx].get("tool_hint")
 
             step_instruction = ""
             # 每个计划步骤只在首次进入 agent 节点时注入一次执行指令。
@@ -265,14 +296,88 @@ class SubAgent(BaseAgent):
                     step_desc,
                     step_idx + 1,
                     len(sub_plan),
+                    tool_hint=tool_hint,
                 )
+                await emit_agent_event(MultiAgentEvent.SUBAGENT_STEP, {
+                    "subagent_type": self.subagent_type,
+                    "step_id": str(
+                        sub_plan[step_idx].get("step_id", step_idx + 1)
+                    ),
+                    "description": step_desc,
+                    "status": "running",
+                    "step_index": step_idx + 1,
+                    "total_steps": len(sub_plan),
+                })
 
             messages = list(state.get("messages", []))
             if step_instruction:
                 messages.append(HumanMessage(content=step_instruction))
 
-            response = await model_with_tools.ainvoke(messages)
+            self.logger.info(
+                "Execute step %d/%d: tool_hint=%s description=%s",
+                step_idx + 1, len(sub_plan), tool_hint or "none",
+                self._log_preview(step_desc, 240),
+            )
+            # Reasoning/synthesis steps must not be able to invent a fallback
+            # tool call. Tool-backed steps are constrained to their plan hint.
+            expected_tool = (
+                self.tool_registry.get(tool_hint) if tool_hint else None
+            )
+            execution_model = (
+                self.model.bind_tools([expected_tool])
+                if expected_tool is not None else self.model
+            )
+            response = await execution_model.ainvoke(messages)
             await self._check_cancelled(config)
+            tool_calls = list(getattr(response, "tool_calls", None) or [])
+            if tool_hint and tool_calls:
+                matching_calls = [
+                    call for call in tool_calls if call.get("name") == tool_hint
+                ]
+                if not matching_calls:
+                    requested = ", ".join(
+                        str(call.get("name", "unknown")) for call in tool_calls
+                    )
+                    raise SubAgentExecutionError(
+                        f"步骤 {step_idx + 1} 应调用 {tool_hint}，"
+                        f"但模型请求了 {requested}",
+                        retryable=True,
+                    )
+                if len(tool_calls) != 1:
+                    self.logger.warning(
+                        "Ignoring unexpected tool calls: step=%d expected=%s ignored=%s",
+                        step_idx + 1, tool_hint,
+                        [
+                            call.get("name", "unknown") for call in tool_calls
+                            if call is not matching_calls[0]
+                        ],
+                    )
+                    response = response.model_copy(
+                        update={"tool_calls": [matching_calls[0]]},
+                    )
+                    tool_calls = [matching_calls[0]]
+            if tool_calls:
+                for call in tool_calls:
+                    self.logger.info(
+                        "Model requested tool: step=%d tool=%s args=%s",
+                        step_idx + 1, call.get("name", "unknown"),
+                        self._safe_tool_args(call.get("args", {})),
+                    )
+            else:
+                self.logger.info(
+                    "Model returned text: step=%d chars=%d preview=%s",
+                    step_idx + 1,
+                    len(self._message_chunk_text(response.content)),
+                    self._log_preview(
+                        self._message_chunk_text(response.content), 240,
+                    ),
+                )
+                if tool_hint:
+                    raise SubAgentExecutionError(
+                        f"步骤 {step_idx + 1} 指定了工具 {tool_hint}，"
+                        "但模型没有发起工具调用",
+                        retryable=True,
+                    )
             return {
                 "messages": [response],
                 "react_iteration_count": state.get("react_iteration_count", 0) + 1,
@@ -281,8 +386,66 @@ class SubAgent(BaseAgent):
         async def tools_node(state: SubAgentState, config: RunnableConfig) -> dict:
             await self._check_cancelled(config)
             """工具执行节点"""
-            result = await ToolNode(tools).ainvoke({"messages": state["messages"]})
+            last_message = state.get("messages", [])[-1]
+            tool_calls = list(getattr(last_message, "tool_calls", None) or [])
+            self.logger.info(
+                "Tool node started: calls=%s",
+                [call.get("name", "unknown") for call in tool_calls],
+            )
+            step_idx = state.get("current_step_index", 0)
+            sub_plan = state.get("sub_plan", [])
+            step_id = str(
+                sub_plan[step_idx].get("step_id", step_idx + 1)
+                if 0 <= step_idx < len(sub_plan)
+                else step_idx + 1
+            )
+            for call in tool_calls:
+                await emit_agent_event(MultiAgentEvent.TOOL_CALL, {
+                    "agent": self.subagent_type,
+                    "subagent_type": self.subagent_type,
+                    "step_id": step_id,
+                    "tool_name": call.get("name", "unknown"),
+                    "args": call.get("args", {}),
+                })
+            try:
+                result = await ToolNode(tools).ainvoke(
+                    {"messages": state["messages"]}, config=config,
+                )
+            except AgentRunCancelled:
+                raise
+            except Exception:
+                self.logger.exception(
+                    "Tool node raised: calls=%s",
+                    [call.get("name", "unknown") for call in tool_calls],
+                )
+                raise
             await self._check_cancelled(config)
+            for message in result.get("messages", []):
+                text = self._message_chunk_text(getattr(message, "content", ""))
+                tool_name = getattr(message, "name", None) or "unknown"
+                self.logger.info(
+                    "Tool result: tool=%s status=%s chars=%d preview=%s",
+                    tool_name, getattr(message, "status", "success"), len(text),
+                    self._log_preview(text, 320),
+                )
+                await emit_agent_event(MultiAgentEvent.TOOL_RESULT, {
+                    "agent": self.subagent_type,
+                    "subagent_type": self.subagent_type,
+                    "step_id": step_id,
+                    "tool_name": tool_name,
+                    "result_summary": self._log_preview(text, 400),
+                    "success": getattr(message, "status", "success") != "error",
+                })
+                failure = self._tool_failure(message, text)
+                if failure is not None:
+                    message_text, retryable = failure
+                    self.logger.error(
+                        "Tool execution rejected: tool=%s retryable=%s reason=%s",
+                        tool_name, retryable, message_text,
+                    )
+                    raise SubAgentExecutionError(
+                        message_text, retryable=retryable,
+                    )
             return result
 
         async def advance_step_node(state: SubAgentState, config: RunnableConfig) -> dict:
@@ -299,6 +462,23 @@ class SubAgent(BaseAgent):
             step_results[step_id] = self._latest_execution_result(
                 state.get("messages", [])
             )
+            description = (
+                sub_plan[step_idx].get("description", "")
+                if 0 <= step_idx < len(sub_plan) else ""
+            )
+            await emit_agent_event(MultiAgentEvent.SUBAGENT_STEP, {
+                "subagent_type": self.subagent_type,
+                "step_id": step_id,
+                "description": description,
+                "status": "completed",
+                "step_index": step_idx + 1,
+                "total_steps": len(sub_plan),
+            })
+            await emit_agent_event(MultiAgentEvent.SUBAGENT_PROGRESS, {
+                "subagent_type": self.subagent_type,
+                "step_id": step_id,
+                "progress": round((step_idx + 1) / max(1, len(sub_plan)) * 100),
+            })
             return {
                 "step_results": step_results,
                 "current_step_index": step_idx + 1,
@@ -308,6 +488,11 @@ class SubAgent(BaseAgent):
         async def evaluate_node(state: SubAgentState, config: RunnableConfig) -> dict:
             await self._check_cancelled(config)
             """自评结果质量"""
+            await emit_agent_event(MultiAgentEvent.SUBAGENT_STEP, {
+                "subagent_type": self.subagent_type,
+                "description": "正在评估执行结果",
+                "status": "evaluating",
+            })
             sub_plan = state.get("sub_plan", [])
             step_results = {
                 key: value
@@ -347,6 +532,11 @@ class SubAgent(BaseAgent):
         async def report_node(state: SubAgentState, config: RunnableConfig) -> dict:
             await self._check_cancelled(config)
             """格式化最终结果"""
+            await emit_agent_event(MultiAgentEvent.SUBAGENT_STEP, {
+                "subagent_type": self.subagent_type,
+                "description": "正在整理执行结果",
+                "status": "reporting",
+            })
             step_results = {
                 key: value
                 for key, value in state.get("step_results", {}).items()
@@ -471,12 +661,31 @@ class SubAgent(BaseAgent):
                     description=self.description,
                     capabilities=", ".join(self.capabilities),
                 )),
+                HumanMessage(content=self._assignment_context_message(
+                    assigned_task, context,
+                )),
             ],
         }
 
+        self.logger.info(
+            "Run started: thread_id=%s task=%s context_chars=%d tools=%s",
+            tid, self._log_preview(assigned_task, 300), len(context),
+            self.tool_registry.list_names() if self.tool_registry else [],
+        )
         try:
             result = await self._graph.ainvoke(initial_state, config)
-            return result.get("final_result", "")
+            final_result = result.get("final_result", "")
+            self.logger.info(
+                "Run completed: thread_id=%s result_chars=%d preview=%s",
+                tid, len(final_result), self._log_preview(final_result, 320),
+            )
+            return final_result
+        except AgentRunCancelled:
+            self.logger.info("Run cancelled: thread_id=%s", tid)
+            raise
+        except Exception:
+            self.logger.exception("Run failed: thread_id=%s", tid)
+            raise
         finally:
             self._cancellation_events.pop(tid, None)
 
@@ -512,6 +721,9 @@ class SubAgent(BaseAgent):
                     subagent_type=self.subagent_type,
                     description=self.description,
                     capabilities=", ".join(self.capabilities),
+                )),
+                HumanMessage(content=self._assignment_context_message(
+                    assigned_task, context,
                 )),
             ],
         }
@@ -579,6 +791,74 @@ class SubAgent(BaseAgent):
                 desc = desc[:120] + "..."
             lines.append(f"  - **{t.name}**: {desc}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _assignment_context_message(assigned_task: str, context: str) -> str:
+        context_text = context.strip()
+        if context_text and context_text in assigned_task:
+            context_text = "（资源上下文已包含在上方委托中）"
+        return (
+            "## 主智能体分配的任务\n"
+            f"{assigned_task}\n\n"
+            "## 当前执行上下文\n"
+            f"{context_text or '（无额外上下文）'}\n\n"
+            "执行每个步骤时必须继续使用以上上下文中的真实路径和约束，"
+            "不得改用系统剪贴板或猜测文件路径。"
+        )
+
+    def _resolve_tool_hint(self, tool_hint: str | None) -> str | None:
+        """Resolve an MCP server's short tool name to its registered full name."""
+        if not tool_hint or not self.tool_registry:
+            return tool_hint
+        names = self.tool_registry.list_names()
+        if tool_hint in names:
+            return tool_hint
+        matches = [name for name in names if name.endswith(f"_{tool_hint}")]
+        return matches[0] if len(matches) == 1 else tool_hint
+
+    @staticmethod
+    def _safe_tool_args(arguments) -> dict:
+        if not isinstance(arguments, dict):
+            return {"value": f"<{type(arguments).__name__}>"}
+        summary = {}
+        for key, value in arguments.items():
+            if key == "path" or key.endswith("_path"):
+                summary[key] = value
+            elif value is None or isinstance(value, (bool, int, float)):
+                summary[key] = value
+            elif isinstance(value, (list, tuple)):
+                summary[key] = f"<{type(value).__name__}:{len(value)}>"
+            else:
+                summary[key] = f"<{type(value).__name__}:{len(str(value))} chars>"
+        return summary
+
+    @staticmethod
+    def _log_preview(value: str, limit: int) -> str:
+        text = " ".join(str(value or "").split())
+        return text if len(text) <= limit else f"{text[:limit]}..."
+
+    @staticmethod
+    def _tool_failure(message, text: str) -> tuple[str, bool] | None:
+        if getattr(message, "status", None) == "error":
+            return (text or "工具执行失败", True)
+        if text.startswith("[MCP] 权限校验失败:"):
+            return (text, False)
+        if text.startswith("[MCP] 服务器") and "当前不可用" in text:
+            return (text, False)
+        if text.startswith("[MCP] 工具调用失败:"):
+            return (text, True)
+        if text.startswith("[MCP] 工具调用已由用户中止"):
+            return (text, False)
+        normalized = text.strip().lower()
+        if normalized.startswith("input validation error:"):
+            return (text, False)
+        if normalized.startswith("错误:") or normalized.startswith("error:"):
+            retryable = any(
+                marker in normalized
+                for marker in ("error code: 429", "timeout", "timed out")
+            ) or any(f"error code: {code}" in normalized for code in range(500, 600))
+            return (text, retryable)
+        return None
 
     @staticmethod
     def _message_chunk_text(content) -> str:

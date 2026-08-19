@@ -1,7 +1,6 @@
 """ParagraphChunker — 按 \n\n 切分，限制 512 token"""
 
-import tiktoken
-from .base import ChunkingStrategy, Chunk
+from .base import ChunkingStrategy, Chunk, get_token_encoder
 from ..parsing.base import ParsedDocument
 
 MAX_TOKENS = 512
@@ -14,7 +13,7 @@ class ParagraphChunker:
         return "paragraph"
 
     def chunk(self, parsed: ParsedDocument, document_id: str) -> list[Chunk]:
-        enc = tiktoken.get_encoding("cl100k_base")
+        enc = get_token_encoder()
         paragraphs = [p.strip() for p in parsed.text.split("\n\n") if p.strip()]
 
         chunks = []

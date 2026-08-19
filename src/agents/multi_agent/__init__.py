@@ -24,16 +24,19 @@ from .main_agent import MainAgent
 from ...prompt import (
     GENERAL_ASSISTANT_CAPABILITIES,
     GENERAL_ASSISTANT_DESCRIPTION,
-    REMOTE_SENSING_CAPABILITIES,
-    REMOTE_SENSING_DESCRIPTION,
+    WORKSPACE_FILE_AGENT_CAPABILITIES,
+    WORKSPACE_FILE_AGENT_DESCRIPTION,
+    VISION_AGENT_CAPABILITIES,
+    VISION_AGENT_DESCRIPTION,
 )
-from ...tools.backend_api import REMOTE_SENSING_TOOLS, REMOTE_SENSING_TOOLS_META
 from ...tools.backend_api.tavily_tools import TAVILY_TOOLS, TAVILY_TOOLS_META
 
 def _filter_mcp(
     tools: list | None,
     metas: dict[str, dict] | None,
     subagent_type: str,
+    *,
+    include_wildcard: bool = True,
 ) -> tuple[list, dict[str, dict]]:
     """按 subagents 字段过滤 MCP 工具，只保留属于该 subagent 类型的。"""
     tools = tools or []
@@ -42,7 +45,7 @@ def _filter_mcp(
     out_metas: dict[str, dict] = {}
     for t in tools:
         allowed = metas.get(t.name, {}).get("subagents", ["*"])
-        if "*" in allowed or subagent_type in allowed:
+        if subagent_type in allowed or (include_wildcard and "*" in allowed):
             out_tools.append(t)
             out_metas[t.name] = metas[t.name]
     return out_tools, out_metas
@@ -62,7 +65,12 @@ def create_default_registry(
     registry = SubAgentRegistry()
 
     ga_tools, ga_metas = _filter_mcp(mcp_tools, mcp_tools_meta, "general_assistant")
-    rs_tools, rs_metas = _filter_mcp(mcp_tools, mcp_tools_meta, "remote_sensing")
+    file_tools, file_metas = _filter_mcp(
+        mcp_tools, mcp_tools_meta, "workspace_file_agent", include_wildcard=False,
+    )
+    vision_tools, vision_metas = _filter_mcp(
+        mcp_tools, mcp_tools_meta, "vision_agent", include_wildcard=False,
+    )
 
     # 注册一个通用子智能体 (示例)
     registry.register(SubAgentMeta(
@@ -84,19 +92,33 @@ def create_default_registry(
     ))
 
     registry.register(SubAgentMeta(
-        subagent_type="remote_sensing",
-        display_name="遥感中心",
-        description=REMOTE_SENSING_DESCRIPTION,
-        capabilities=REMOTE_SENSING_CAPABILITIES,
+        subagent_type="workspace_file_agent",
+        display_name="工作区文件助手",
+        description=WORKSPACE_FILE_AGENT_DESCRIPTION,
+        capabilities=WORKSPACE_FILE_AGENT_CAPABILITIES,
         factory=lambda: SubAgent(
-            name="RemoteSensingCenter",
-            subagent_type="remote_sensing",
-            description=REMOTE_SENSING_DESCRIPTION,
-            capabilities=REMOTE_SENSING_CAPABILITIES,
-            api_tools=REMOTE_SENSING_TOOLS,
-            api_tools_meta=REMOTE_SENSING_TOOLS_META,
-            mcp_tools=rs_tools,
-            mcp_tools_meta=rs_metas,
+            name="WorkspaceFileAgent",
+            subagent_type="workspace_file_agent",
+            description=WORKSPACE_FILE_AGENT_DESCRIPTION,
+            capabilities=WORKSPACE_FILE_AGENT_CAPABILITIES,
+            mcp_tools=file_tools,
+            mcp_tools_meta=file_metas,
+            model_kwargs=model_kwargs,
+        ),
+    ))
+
+    registry.register(SubAgentMeta(
+        subagent_type="vision_agent",
+        display_name="视觉助手",
+        description=VISION_AGENT_DESCRIPTION,
+        capabilities=VISION_AGENT_CAPABILITIES,
+        factory=lambda: SubAgent(
+            name="VisionAgent",
+            subagent_type="vision_agent",
+            description=VISION_AGENT_DESCRIPTION,
+            capabilities=VISION_AGENT_CAPABILITIES,
+            mcp_tools=vision_tools,
+            mcp_tools_meta=vision_metas,
             model_kwargs=model_kwargs,
         ),
     ))

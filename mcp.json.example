@@ -2,6 +2,25 @@
   "enabled": false,
   "servers": [
     {
+      "name": "deepseek_eyes",
+      "transport": "stdio",
+      "enabled": false,
+      "command": "D:\\Project\\m-MCP\\deepseek-eyes\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "deepseek_eyes"],
+      "env": {},
+      "timeout_seconds": 120,
+      "allowed_tools": [
+        "analyze_image",
+        "extract_text",
+        "describe_ui",
+        "diagnose_error",
+        "understand_diagram",
+        "analyze_chart",
+        "code_from_screenshot"
+      ],
+      "subagents": ["vision_agent"]
+    },
+    {
       "name": "knowledge",
       "transport": "stdio",
       "enabled": true,

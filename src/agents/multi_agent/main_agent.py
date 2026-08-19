@@ -28,13 +28,19 @@ MainAgent — 层级多智能体编排器（异步）
 import asyncio
 import sqlite3
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import AsyncGenerator
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    SystemMessage,
+)
 from langchain_core.runnables import RunnableConfig
 
 from ..base import BaseAgent
@@ -54,8 +60,14 @@ from ...tools.multi_agent_planning.result_aggregator import (
 from .sub_agent_registry import SubAgentRegistry
 from .sub_agent import SubAgent
 from .states import MainAgentState
-from .events import MultiAgentEvent
-from .events import AgentRunCancelled
+from .events import (
+    AgentRunCancelled,
+    MultiAgentEvent,
+    SubAgentExecutionError,
+    emit_agent_event,
+    reset_agent_event_sink,
+    set_agent_event_sink,
+)
 from ...utils.logger import get_logger
 from ...prompt import (
     MAIN_AGENT_SYSTEM_PROMPT,
@@ -203,6 +215,11 @@ class MainAgent(BaseAgent):
         async def analyze_node(state: MainAgentState, config: RunnableConfig) -> dict:
             await self._check_cancelled(config)
             """分析用户任务"""
+            await emit_agent_event(MultiAgentEvent.ANALYZING, {
+                "agent": "main",
+                "node": "analyze",
+                "message": "正在分析任务...",
+            })
             user_task = state.get("current_input", state.get("user_task", ""))
             subagent_list = self.sub_agent_registry.build_selection_prompt()
 
@@ -220,8 +237,11 @@ class MainAgent(BaseAgent):
             )
             messages = [
                 SystemMessage(content=MAIN_AGENT_SYSTEM_PROMPT),
-                HumanMessage(content=prompt),
             ]
+            resource_context = state.get("resource_context", "").strip()
+            if resource_context:
+                messages.append(SystemMessage(content=resource_context))
+            messages.append(HumanMessage(content=prompt))
             response = await self._ainvoke_structured(
                 TaskAnalysisOutput,
                 messages,
@@ -234,6 +254,14 @@ class MainAgent(BaseAgent):
                 response.needs_subagents, response.complexity,
                 response.suggested_subagents,
             )
+            await emit_agent_event(MultiAgentEvent.ANALYSIS_DONE, {
+                "agent": "main",
+                "node": "analyze",
+                "task_summary": response.task_summary,
+                "complexity": response.complexity,
+                "needs_subagents": response.needs_subagents,
+                "suggested_subagents": response.suggested_subagents,
+            })
             return {
                 "intent": response.intent,
                 "resolved_task": response.resolved_task,
@@ -248,6 +276,11 @@ class MainAgent(BaseAgent):
         async def respond_node(state: MainAgentState, config: RunnableConfig) -> dict:
             await self._check_cancelled(config)
             """简单任务直接回答"""
+            await emit_agent_event(MultiAgentEvent.STATUS, {
+                "agent": "main",
+                "node": "respond",
+                "message": "正在生成回答...",
+            })
             user_task = state.get("resolved_task") or state.get("user_task", "")
             messages = self._build_context_messages(
                 state, build_direct_response_prompt(user_task),
@@ -263,6 +296,11 @@ class MainAgent(BaseAgent):
         async def plan_node(state: MainAgentState, config: RunnableConfig) -> dict:
             await self._check_cancelled(config)
             """生成执行计划"""
+            await emit_agent_event(MultiAgentEvent.STATUS, {
+                "agent": "main",
+                "node": "plan",
+                "message": "正在生成执行计划...",
+            })
             user_task = state.get("resolved_task") or state.get("user_task", "")
             task_summary = state.get("task_summary", "")
 
@@ -274,6 +312,15 @@ class MainAgent(BaseAgent):
                     resumed["current_step_index"] + 1,
                     len(resumed["plan"]),
                 )
+                await emit_agent_event(MultiAgentEvent.PLAN_CREATED, {
+                    "agent": "main",
+                    "node": "plan",
+                    "plan": resumed["plan"],
+                    "strategy": resumed["plan_raw"],
+                    "resumed_from_turn_id": resumed.get(
+                        "resumed_from_turn_id", "",
+                    ),
+                })
                 return resumed
 
             # 构建 subagent 选择上下文
@@ -314,6 +361,12 @@ class MainAgent(BaseAgent):
                 })
 
             self.logger.info("Plan: %d steps — %s", len(plan), response.overall_strategy)
+            await emit_agent_event(MultiAgentEvent.PLAN_CREATED, {
+                "agent": "main",
+                "node": "plan",
+                "plan": plan,
+                "strategy": response.overall_strategy,
+            })
             return {
                 "plan": plan,
                 "plan_raw": response.overall_strategy,
@@ -331,6 +384,7 @@ class MainAgent(BaseAgent):
             results = dict(state.get("subagent_results", {}))
             statuses = dict(state.get("subagent_statuses", {}))
             retry_counts = dict(state.get("step_retry_counts", {}))
+            failure_retryable = True
 
             if step_idx >= len(plan):
                 return {"subagent_results": results, "subagent_statuses": statuses}
@@ -340,9 +394,26 @@ class MainAgent(BaseAgent):
             subagent_type = self._normalize_subagent_type(
                 step.get("subagent_type")
             )
+            effective_agent = subagent_type or "main"
+            attempt = retry_counts.get(step_id, 0) + 1
 
             self.logger.info("Execute step %d/%d: %s → %s",
                              step_idx + 1, len(plan), step_id, subagent_type or "direct")
+            event_data = {
+                "agent": "main",
+                "node": "execute",
+                "step_id": step_id,
+                "description": step.get("description", ""),
+                "subagent_type": effective_agent,
+                "attempt": attempt,
+                "total_steps": len(plan),
+            }
+            await emit_agent_event(MultiAgentEvent.DISPATCHING, event_data)
+            await emit_agent_event(MultiAgentEvent.SUBAGENT_START, event_data)
+            await emit_agent_event(MultiAgentEvent.SUBAGENT_STEP, {
+                **event_data,
+                "status": "running",
+            })
 
             if subagent_type is None:
                 # 无需 subagent — main_agent 直接处理
@@ -360,7 +431,7 @@ class MainAgent(BaseAgent):
                 except AgentRunCancelled:
                     raise
                 except Exception as e:
-                    self.logger.error("MainAgent direct step %s failed: %s", step_id, e)
+                    self.logger.exception("MainAgent direct step %s failed", step_id)
                     results[step_id] = f"[失败] {e}"
                     statuses[step_id] = "failed"
             else:
@@ -373,6 +444,11 @@ class MainAgent(BaseAgent):
                 try:
                     sub = await self._get_or_create_subagent(subagent_type)
                     context = self._build_context_for_step(step, results)
+                    resource_context = state.get("resource_context", "").strip()
+                    if resource_context:
+                        context = "\n\n".join(
+                            part for part in (resource_context, context) if part
+                        )
                     if state.get("reuse_previous_artifacts"):
                         previous_context = self._format_previous_artifacts(
                             state.get("previous_artifacts", [])
@@ -394,19 +470,48 @@ class MainAgent(BaseAgent):
                         ),
                     )
                     await self._check_cancelled(config)
+                    if not str(result or "").strip():
+                        raise SubAgentExecutionError(
+                            f"SubAgent {subagent_type} 返回了空结果",
+                            retryable=True,
+                        )
                     results[step_id] = result
                     statuses[step_id] = "success"
                 except AgentRunCancelled:
                     raise
-                except Exception as e:
-                    self.logger.error("SubAgent %s failed: %s", subagent_type, e)
+                except SubAgentExecutionError as e:
+                    failure_retryable = e.retryable
+                    self.logger.error(
+                        "SubAgent execution failed: type=%s step=%s retryable=%s error=%s",
+                        subagent_type, step_id, e.retryable, e,
+                    )
                     results[step_id] = f"[失败] {e}"
                     statuses[step_id] = "failed"
+                except Exception as e:
+                    self.logger.exception(
+                        "SubAgent raised unexpectedly: type=%s step=%s",
+                        subagent_type, step_id,
+                    )
+                    results[step_id] = f"[失败] {e}"
+                    statuses[step_id] = "failed"
+
+            await emit_agent_event(MultiAgentEvent.SUBAGENT_DONE, {
+                **event_data,
+                "success": statuses[step_id] == "success",
+                "status": statuses[step_id],
+                "result_summary": str(results.get(step_id, ""))[:400],
+            })
 
             if statuses[step_id] == "failed":
                 failed_attempts = retry_counts.get(step_id, 0) + 1
                 retry_counts[step_id] = failed_attempts
-                if failed_attempts <= self._max_step_retries:
+                if not failure_retryable:
+                    next_step_idx = step_idx + 1
+                    self.logger.error(
+                        "Step %s has a non-retryable failure; skipping retries",
+                        step_id,
+                    )
+                elif failed_attempts <= self._max_step_retries:
                     next_step_idx = step_idx
                     self.logger.warning(
                         "Retrying failed step %s (%d/%d)",
@@ -435,6 +540,11 @@ class MainAgent(BaseAgent):
         async def synthesize_node(state: MainAgentState, config: RunnableConfig) -> dict:
             await self._check_cancelled(config)
             """综合所有 subagent 结果"""
+            await emit_agent_event(MultiAgentEvent.SYNTHESIZING, {
+                "agent": "main",
+                "node": "synthesize",
+                "message": "正在综合结果...",
+            })
             user_task = state.get("resolved_task") or state.get("user_task", "")
             results = state.get("subagent_results", {})
             plan = state.get("plan", [])
@@ -461,6 +571,14 @@ class MainAgent(BaseAgent):
 
             self.logger.info("Synthesize: confidence=%s, sources=%s",
                              response.confidence, response.sources)
+            await emit_agent_event(MultiAgentEvent.SYNTHESIS_DONE, {
+                "agent": "main",
+                "node": "synthesize",
+                "answer": response.answer,
+                "sources": response.sources,
+                "confidence": response.confidence,
+                "turn_id": state.get("turn_id", ""),
+            })
             return {
                 "synthesized_answer": response.answer,
                 "synthesis_sources": response.sources,
@@ -535,6 +653,7 @@ class MainAgent(BaseAgent):
         conversation_context: list[dict] | None = None,
         conversation_summary: str = "",
         previous_artifacts: list[dict] | None = None,
+        resource_context: str = "",
     ) -> str:
         """执行用户任务 (异步)
 
@@ -555,6 +674,7 @@ class MainAgent(BaseAgent):
             conversation_context=conversation_context,
             conversation_summary=conversation_summary,
             previous_artifacts=previous_artifacts,
+            resource_context=resource_context,
         )
 
         try:
@@ -573,6 +693,7 @@ class MainAgent(BaseAgent):
         conversation_context: list[dict] | None = None,
         conversation_summary: str = "",
         previous_artifacts: list[dict] | None = None,
+        resource_context: str = "",
     ) -> AsyncGenerator[dict, None]:
         """执行任务 (异步流式)
 
@@ -594,54 +715,80 @@ class MainAgent(BaseAgent):
             conversation_context=conversation_context,
             conversation_summary=conversation_summary,
             previous_artifacts=previous_artifacts,
+            resource_context=resource_context,
         )
 
-        last_node = None
+        event_queue: asyncio.Queue[dict | object] = asyncio.Queue()
+        stream_closed = object()
+        synthesis_emitted = False
 
-        try:
-            async for chunk, metadata in self._graph.astream(
-                initial_state, config, stream_mode="messages"
-            ):
-                node_name = metadata.get("langgraph_node", "")
-                if (
-                    node_name == "respond"
-                    and isinstance(chunk, AIMessage)
-                    and chunk.content
-                ):
-                    text = self._message_chunk_text(chunk.content)
-                    if text:
-                        yield {
-                            "event": MultiAgentEvent.TOKEN,
-                            "data": {"text": text, "agent": "main"},
-                        }
-
-                # 节点转换事件
-                if node_name != last_node:
-                    event = self._node_to_event(node_name)
-                    if event:
-                        yield event
-                    last_node = node_name
-
-            final_state = await self._graph.aget_state(config)
-            final_values = final_state.values if final_state else {}
-            answer = final_values.get("synthesized_answer", "")
-            if answer:
-                yield {
-                    "event": MultiAgentEvent.SYNTHESIS_DONE,
-                    "data": {
-                        "answer": answer,
-                        "sources": final_values.get("synthesis_sources", []),
-                        "confidence": final_values.get(
-                            "synthesis_confidence", "medium"
-                        ),
-                        "turn_id": turn_id,
-                    },
-                }
-            yield {
-                "event": MultiAgentEvent.DONE,
-                "data": {"session_id": tid, "turn_id": turn_id},
+        async def enqueue_event(event: dict) -> None:
+            nonlocal synthesis_emitted
+            event = {
+                "event": str(event.get("event", "message")),
+                "data": event.get("data", {}),
             }
+            if event["event"] == MultiAgentEvent.SYNTHESIS_DONE:
+                synthesis_emitted = True
+            await event_queue.put(event)
+
+        async def produce_events() -> None:
+            sink_token = set_agent_event_sink(enqueue_event)
+            try:
+                async for chunk, metadata in self._graph.astream(
+                    initial_state, config, stream_mode="messages"
+                ):
+                    node_name = metadata.get("langgraph_node", "")
+                    if (
+                        node_name == "respond"
+                        and isinstance(chunk, (AIMessage, AIMessageChunk))
+                        and chunk.content
+                    ):
+                        text = self._message_chunk_text(chunk.content)
+                        if text:
+                            await enqueue_event({
+                                "event": MultiAgentEvent.TOKEN,
+                                "data": {"text": text, "agent": "main"},
+                            })
+
+                final_state = await self._graph.aget_state(config)
+                final_values = final_state.values if final_state else {}
+                answer = final_values.get("synthesized_answer", "")
+                if answer and not synthesis_emitted:
+                    await enqueue_event({
+                        "event": MultiAgentEvent.SYNTHESIS_DONE,
+                        "data": {
+                            "answer": answer,
+                            "sources": final_values.get(
+                                "synthesis_sources", [],
+                            ),
+                            "confidence": final_values.get(
+                                "synthesis_confidence", "medium",
+                            ),
+                            "turn_id": turn_id,
+                        },
+                    })
+                await enqueue_event({
+                    "event": MultiAgentEvent.DONE,
+                    "data": {"session_id": tid, "turn_id": turn_id},
+                })
+            finally:
+                reset_agent_event_sink(sink_token)
+                await event_queue.put(stream_closed)
+
+        producer_task = asyncio.create_task(produce_events())
+        try:
+            while True:
+                event = await event_queue.get()
+                if event is stream_closed:
+                    break
+                yield event
+            await producer_task
         finally:
+            if not producer_task.done():
+                producer_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await producer_task
             if cancellation_event is not None:
                 cancellation_event.set()
             self._cancellation_events.pop(tid, None)
@@ -726,6 +873,7 @@ class MainAgent(BaseAgent):
         conversation_context: list[dict] | None,
         conversation_summary: str,
         previous_artifacts: list[dict] | None,
+        resource_context: str,
     ) -> MainAgentState:
         """构造完整的新轮次状态，显式覆盖同一 checkpoint 的旧编排字段。"""
         return {
@@ -733,6 +881,7 @@ class MainAgent(BaseAgent):
             "current_input": user_task,
             "conversation_context": list(conversation_context or []),
             "conversation_summary": conversation_summary,
+            "resource_context": resource_context,
             "previous_artifacts": list(previous_artifacts or []),
             "resumed_from_turn_id": "",
             "user_task": user_task,
@@ -759,6 +908,9 @@ class MainAgent(BaseAgent):
     ) -> list:
         """只注入用户可见对话和摘要，不注入编排内部消息。"""
         messages = [SystemMessage(content=MAIN_AGENT_SYSTEM_PROMPT)]
+        resource_context = state.get("resource_context", "").strip()
+        if resource_context:
+            messages.append(SystemMessage(content=resource_context))
         summary = state.get("conversation_summary", "").strip()
         if summary:
             messages.append(SystemMessage(content=f"较早对话摘要：\n{summary}"))

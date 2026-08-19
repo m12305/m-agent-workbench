@@ -13,12 +13,17 @@ import src.agents.multi_agent.sub_agent as sub_agent_module
 from src.agents.multi_agent.main_agent import MainAgent
 from src.agents.multi_agent.sub_agent import SubAgent
 from src.agents.multi_agent.sub_agent_registry import SubAgentMeta
+from src.agents.multi_agent.events import (
+    MultiAgentEvent,
+    SubAgentExecutionError,
+    emit_agent_event,
+)
 from src.agents.base import BaseAgent
 from src.server.services.multi_agent_service import (
     MultiAgentService,
     MultiAgentSessionBusyError,
 )
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 
@@ -108,6 +113,7 @@ class _StructuredModel:
 class _SubAgentModel:
     def __init__(self):
         self.agent_calls = 0
+        self.agent_messages = []
 
     def bind_tools(self, _tools):
         return self
@@ -115,8 +121,9 @@ class _SubAgentModel:
     def with_structured_output(self, schema):
         return _StructuredModel(schema)
 
-    async def ainvoke(self, _messages):
+    async def ainvoke(self, messages):
         self.agent_calls += 1
+        self.agent_messages.append(messages)
         return AIMessage(content=f"result-{self.agent_calls}")
 
 
@@ -130,11 +137,40 @@ async def test_subagent_persists_each_planned_step_before_evaluation():
     agent._initialized = True
     agent._build_graph()
 
-    result = await agent.arun("do two things", thread_id="two-steps")
+    result = await agent.arun(
+        "do two things", thread_id="two-steps",
+        context=r"image_path=D:\attachments\picture.png",
+    )
 
     assert "result-1" in result
     assert "result-2" in result
     assert agent.model.agent_calls == 2
+    assert any(
+        r"D:\attachments\picture.png" in str(message.content)
+        for message in agent.model.agent_messages[0]
+    )
+
+
+def test_subagent_marks_mcp_permission_failure_as_non_retryable():
+    message = ToolMessage(
+        content="[MCP] 权限校验失败: 不能直接读取系统剪贴板",
+        tool_call_id="call-1",
+    )
+
+    failure = SubAgent._tool_failure(message, str(message.content))
+
+    assert failure == (str(message.content), False)
+
+
+def test_subagent_marks_mcp_validation_text_as_non_retryable():
+    message = ToolMessage(
+        content="Input validation error: None is not of type 'string'",
+        tool_call_id="call-2",
+    )
+
+    failure = SubAgent._tool_failure(message, str(message.content))
+
+    assert failure == (str(message.content), False)
 
 
 class _MainAgentStructuredModel:
@@ -456,6 +492,25 @@ class _FlakySubAgent:
         return "recovered result"
 
 
+class _ObservableSubAgent:
+    async def arun(self, *_args, **_kwargs):
+        await emit_agent_event(MultiAgentEvent.SUBAGENT_PLAN, {
+            "subagent_type": "worker",
+            "plan": [{"step_id": 1, "description": "inspect workspace"}],
+        })
+        await emit_agent_event(MultiAgentEvent.TOOL_CALL, {
+            "agent": "worker",
+            "tool_name": "read_file",
+            "args": {"path": "demo/index.html"},
+        })
+        await emit_agent_event(MultiAgentEvent.TOOL_RESULT, {
+            "agent": "worker",
+            "tool_name": "read_file",
+            "result_summary": "file read",
+        })
+        return "observable result"
+
+
 class _FailingSubAgent:
     def __init__(self):
         self.calls = 0
@@ -463,6 +518,15 @@ class _FailingSubAgent:
     async def arun(self, *_args, **_kwargs):
         self.calls += 1
         raise RuntimeError("persistent failure")
+
+
+class _NonRetryableSubAgent:
+    def __init__(self):
+        self.calls = 0
+
+    async def arun(self, *_args, **_kwargs):
+        self.calls += 1
+        raise SubAgentExecutionError("file permission rejected", retryable=False)
 
 
 @pytest.mark.asyncio
@@ -494,6 +558,50 @@ async def test_main_agent_retries_failed_execute_step_without_replanning():
 
 
 @pytest.mark.asyncio
+async def test_main_agent_stream_forwards_execution_progress_events():
+    agent = MainAgent(max_step_retries=0)
+    _register_worker(agent)
+    agent.model = _MainAgentModel()
+    agent._checkpointer = MemorySaver()
+    agent._store = InMemoryStore()
+    agent._initialized = True
+
+    async def _get_sub(_subagent_type):
+        return _ObservableSubAgent()
+
+    agent._get_or_create_subagent = _get_sub
+    agent._build_graph()
+
+    events = [
+        event async for event in agent.arun_stream(
+            "delegate this", thread_id="observable-stream", turn_id="turn-1",
+        )
+    ]
+    event_types = [str(event["event"]) for event in events]
+
+    assert event_types == [
+        "analyzing",
+        "analysis_done",
+        "status",
+        "plan_created",
+        "dispatching",
+        "subagent_start",
+        "subagent_step",
+        "subagent_plan",
+        "tool_call",
+        "tool_result",
+        "subagent_done",
+        "synthesizing",
+        "synthesis_done",
+        "done",
+    ]
+    assert events[1]["data"]["task_summary"] == "delegate one step"
+    assert events[3]["data"]["plan"][0]["description"] == "flaky work"
+    assert events[4]["data"]["step_id"] == "1"
+    assert events[-2]["data"]["answer"] == "aggregated success"
+
+
+@pytest.mark.asyncio
 async def test_main_agent_stops_retrying_step_after_configured_limit():
     agent = MainAgent(max_step_retries=2)
     _register_worker(agent)
@@ -517,6 +625,31 @@ async def test_main_agent_stops_retrying_step_after_configured_limit():
     assert final_state.values["current_step_index"] == 1
     assert final_state.values["subagent_statuses"] == {"1": "failed"}
     assert final_state.values["step_retry_counts"] == {"1": 3}
+
+
+@pytest.mark.asyncio
+async def test_main_agent_does_not_retry_non_retryable_subagent_failure():
+    agent = MainAgent(max_step_retries=2)
+    _register_worker(agent)
+    agent.model = _MainAgentModel()
+    agent._checkpointer = MemorySaver()
+    agent._store = InMemoryStore()
+    agent._initialized = True
+    failing_subagent = _NonRetryableSubAgent()
+
+    async def _get_sub(_subagent_type):
+        return failing_subagent
+    agent._get_or_create_subagent = _get_sub
+    agent._build_graph()
+
+    await agent.arun("delegate this", thread_id="execute-non-retryable")
+    final_state = await agent._graph.aget_state({
+        "configurable": {"thread_id": "execute-non-retryable"}
+    })
+
+    assert failing_subagent.calls == 1
+    assert final_state.values["current_step_index"] == 1
+    assert final_state.values["subagent_statuses"] == {"1": "failed"}
 
 
 def test_service_cancel_run_sets_active_cancellation_event():

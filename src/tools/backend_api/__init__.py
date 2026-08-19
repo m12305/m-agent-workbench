@@ -14,13 +14,9 @@ SubAgent 专属的与后端 API 交互的 LangChain tool。
 ===========================================================================
 """
 
-from .earth_control import REMOTE_SENSING_TOOLS, earth_move, REMOTE_SENSING_TOOLS_META
 from .tavily_tools import TAVILY_TOOLS, TAVILY_TOOLS_META
 
 __all__ = [
-    "REMOTE_SENSING_TOOLS",
-    "earth_move",
-    "REMOTE_SENSING_TOOLS_META",
     "TAVILY_TOOLS",
     "TAVILY_TOOLS_META",
 ]

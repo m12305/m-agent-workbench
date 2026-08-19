@@ -9,6 +9,8 @@ SessionType = Literal["chat", "multi_agent"]
 MessageRole = Literal["user", "assistant"]
 MessageStatus = Literal["pending", "complete", "failed", "cancelled"]
 TurnStatus = Literal["running", "completed", "failed", "cancelled"]
+WorkspacePermission = Literal["read_only", "read_write"]
+AttachmentSource = Literal["file_picker", "clipboard"]
 
 
 @dataclass
@@ -116,6 +118,31 @@ class ConversationSummary:
     updated_at: datetime = field(default_factory=datetime.utcnow)
 
 
+@dataclass
+class MultiAgentWorkspace:
+    session_id: str
+    user_id: str
+    root_path: str
+    permission: WorkspacePermission = "read_only"
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+
+
+@dataclass
+class MultiAgentAttachment:
+    attachment_id: str
+    session_id: str
+    user_id: str
+    filename: str
+    storage_path: str
+    mime_type: str
+    file_size: int
+    file_hash: str
+    source: AttachmentSource = "file_picker"
+    turn_id: str | None = None
+    created_at: datetime = field(default_factory=datetime.utcnow)
+
+
 class SessionMessageRepository(Protocol):
     async def create(self, message: SessionMessage) -> SessionMessage: ...
     async def list_by_session(self, session_id: str) -> list[SessionMessage]: ...
@@ -135,6 +162,21 @@ class ConversationSummaryRepository(Protocol):
     async def get(self, session_id: str) -> ConversationSummary | None: ...
     async def upsert(self, summary: ConversationSummary) -> ConversationSummary: ...
     async def delete(self, session_id: str) -> None: ...
+
+
+class MultiAgentWorkspaceRepository(Protocol):
+    async def get(self, session_id: str) -> MultiAgentWorkspace | None: ...
+    async def upsert(self, workspace: MultiAgentWorkspace) -> MultiAgentWorkspace: ...
+    async def delete(self, session_id: str) -> None: ...
+
+
+class MultiAgentAttachmentRepository(Protocol):
+    async def create(self, attachment: MultiAgentAttachment) -> MultiAgentAttachment: ...
+    async def get(self, attachment_id: str) -> MultiAgentAttachment | None: ...
+    async def list_by_session(self, session_id: str) -> list[MultiAgentAttachment]: ...
+    async def bind_to_turn(self, attachment_ids: list[str], turn_id: str) -> None: ...
+    async def delete(self, attachment_id: str) -> None: ...
+    async def delete_by_session(self, session_id: str) -> None: ...
 
 
 # ═══════════════════════════════════════════════════════════════

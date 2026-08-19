@@ -400,6 +400,8 @@ class _FakeMcpAdapter:
 @pytest.mark.asyncio
 async def test_lifespan_wires_mcp_tools_when_configured(monkeypatch, tmp_path):
     monkeypatch.setenv("REPOSITORY_BACKEND", "memory")
+    monkeypatch.setenv("BAILIAN_API_KEY", "")
+    monkeypatch.setenv("MILVUS_HOST", "")
     monkeypatch.setenv("MCP_CONFIG_PATH", str(tmp_path / "mcp.json"))
     (tmp_path / "mcp.json").write_text(
         '{"enabled": true, "servers": [{"name": "k", "transport": "stdio", "command": "python"}]}',

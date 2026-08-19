@@ -20,6 +20,8 @@ async def client(tmp_path, monkeypatch) -> AsyncIterator[AsyncClient]:
     monkeypatch.setenv("BAILIAN_API_KEY", "")
     monkeypatch.setenv("MILVUS_HOST", "")
     monkeypatch.setenv("MINERU_API_KEY", "")
+    monkeypatch.setenv("MULTI_AGENT_WORKSPACE_ROOTS", str(tmp_path))
+    monkeypatch.setenv("MULTI_AGENT_ATTACHMENT_DIR", str(tmp_path / "multi-agent-attachments"))
 
     from src.server.main import app
     from src.rag.documents import DocumentService

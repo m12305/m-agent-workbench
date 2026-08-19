@@ -1,9 +1,13 @@
 """文档管理 API 路由"""
 
 import logging
+import mimetypes
 from urllib.parse import quote
 
-import magic
+try:
+    import magic
+except ImportError:  # python-magic on Windows may be installed without libmagic DLL.
+    magic = None
 from fastapi import APIRouter, Depends, Request, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
 
@@ -23,6 +27,17 @@ from ...rag.documents.errors import FileTooLargeError, UnsupportedFormatError
 
 logger = logging.getLogger("server.document_api")
 router = APIRouter()
+
+
+def _detect_mime(content: bytes, filename: str) -> str:
+    if magic is not None:
+        return str(magic.from_buffer(content[:2048], mime=True))
+    if content.startswith(b"%PDF-"):
+        return "application/pdf"
+    guessed = mimetypes.guess_type(filename)[0]
+    if guessed in {"text/markdown", "text/x-markdown"}:
+        return "text/plain"
+    return guessed or "application/octet-stream"
 
 
 def get_doc_service(request: Request) -> DocumentService:
@@ -64,7 +79,7 @@ async def _upload_one(
         if len(content) > MAX_FILE_SIZE:
             raise FileTooLargeError(len(content), MAX_FILE_SIZE)
 
-        detected_mime = magic.from_buffer(content[:2048], mime=True)
+        detected_mime = _detect_mime(content, filename)
         effective_scope = scope
         if effective_scope == "shared" and identity.role != "admin":
             effective_scope = "private"

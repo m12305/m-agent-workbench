@@ -141,6 +141,35 @@ class MessageView(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class MultiAgentWorkspaceRequest(BaseModel):
+    root_path: str = Field(min_length=1, max_length=4096)
+    permission: Literal["read_only", "read_write"] = "read_only"
+
+
+class MultiAgentWorkspaceResponse(BaseModel):
+    session_id: str
+    root_path: str
+    permission: Literal["read_only", "read_write"]
+    created_at: datetime
+    updated_at: datetime
+
+
+class MultiAgentWorkspaceRootsResponse(BaseModel):
+    roots: list[str]
+
+
+class MultiAgentAttachmentResponse(BaseModel):
+    attachment_id: str
+    session_id: str
+    turn_id: str | None = None
+    filename: str
+    mime_type: str
+    file_size: int
+    source: Literal["file_picker", "clipboard"]
+    kind: Literal["text", "image", "pdf_office_unparsed", "binary"]
+    created_at: datetime
+
+
 # ═══════════════════════════════════════════════════════════════
 # 问答
 # ═══════════════════════════════════════════════════════════════

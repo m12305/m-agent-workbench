@@ -20,6 +20,7 @@ import hashlib
 import logging
 import math
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator
@@ -41,6 +42,8 @@ from ..repositories.memory import (
     InMemorySessionMessageRepo,
 )
 from .session_service import SessionService
+from .multi_agent_workspace_service import MultiAgentWorkspaceService
+from ...tools.mcp.scope import reset_file_scope, set_file_scope
 
 logger = logging.getLogger("server.multi_agent_service")
 
@@ -65,6 +68,7 @@ class MultiAgentService:
         turn_repo: MultiAgentTurnRepository | None = None,
         summary_repo: ConversationSummaryRepository | None = None,
         session_service: SessionService | None = None,
+        workspace_service: MultiAgentWorkspaceService | None = None,
         max_context_tokens: int = 6000,
         max_history_turns: int = 10,
     ):
@@ -78,6 +82,7 @@ class MultiAgentService:
         self._turn_repo = turn_repo or InMemoryMultiAgentTurnRepo()
         self._summary_repo = summary_repo or InMemoryConversationSummaryRepo()
         self._session_service = session_service
+        self._workspace_service = workspace_service
         self._max_context_tokens = max(512, int(max_context_tokens))
         self._max_history_turns = max(1, int(max_history_turns))
         self._session_locks: dict[str, asyncio.Lock] = {}
@@ -118,6 +123,7 @@ class MultiAgentService:
         user_id: str,
         session_id: str,
         query: str,
+        attachment_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict, None]:
         """异步流式问答 — 逐事件 yield SSE dict
 
@@ -130,6 +136,20 @@ class MultiAgentService:
         # 同一会话只允许一个图执行，避免重复提交造成 checkpoint 写竞争。
         session_lock = self._session_locks.setdefault(tid, asyncio.Lock())
         async with session_lock:
+            current_attachments = []
+            resource_context = ""
+            execution_scope = None
+            if self._workspace_service is not None:
+                await self._workspace_service.require_workspace(user_id, session_id)
+                current_attachments = await self._workspace_service.validate_attachments(
+                    user_id, session_id, attachment_ids or [],
+                )
+                resource_context = await self._workspace_service.build_resource_context(
+                    user_id, session_id, current_attachments,
+                )
+                execution_scope = await self._workspace_service.execution_scope(
+                    user_id, session_id,
+                )
             existing_messages = await self._message_repo.list_by_session(session_id)
             summary, conversation_context = await self._prepare_conversation_context(
                 agent, session_id, existing_messages,
@@ -156,18 +176,37 @@ class MultiAgentService:
                 role="user",
                 content=query,
                 status="complete",
+                metadata={
+                    "attachments": [
+                        {
+                            "attachment_id": item.attachment_id,
+                            "filename": item.filename,
+                            "mime_type": item.mime_type,
+                        }
+                        for item in current_attachments
+                    ],
+                },
                 created_at=now,
             ))
+            if self._workspace_service is not None:
+                await self._workspace_service.bind_attachments_to_turn(
+                    current_attachments, turn_id,
+                )
             await self._sync_message_count(session_id)
 
             cancellation_event = asyncio.Event()
             self._active_runs[tid] = cancellation_event
             finalized = False
-            yield {
-                "event": "turn_started",
-                "data": {"turn_id": turn_id, "session_id": session_id},
-            }
+            if execution_scope is not None:
+                execution_scope = replace(
+                    execution_scope, cancellation_event=cancellation_event,
+                )
+            scope_token = set_file_scope(execution_scope) if execution_scope else None
             try:
+                yield {
+                    "event": "turn_started",
+                    "data": {"turn_id": turn_id, "session_id": session_id},
+                }
                 async for event in agent.arun_stream(
                     query,
                     thread_id=tid,
@@ -176,6 +215,7 @@ class MultiAgentService:
                     conversation_context=conversation_context,
                     conversation_summary=summary,
                     previous_artifacts=previous_artifacts,
+                    resource_context=resource_context,
                 ):
                     if event.get("event") == "done":
                         continue
@@ -229,6 +269,8 @@ class MultiAgentService:
                     },
                 }
             finally:
+                if scope_token is not None:
+                    reset_file_scope(scope_token)
                 cancellation_event.set()
                 if self._active_runs.get(tid) is cancellation_event:
                     self._active_runs.pop(tid, None)
@@ -262,6 +304,8 @@ class MultiAgentService:
         await self._message_repo.delete_by_session(session_id)
         await self._turn_repo.delete_by_session(session_id)
         await self._summary_repo.delete(session_id)
+        if self._workspace_service is not None:
+            await self._workspace_service.delete_session_resources(user_id, session_id)
         self._session_locks.pop(tid, None)
         logger.info("Multi-Agent 会话状态已删除: thread_id=%s", tid)
 

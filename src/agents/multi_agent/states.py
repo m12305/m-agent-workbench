@@ -39,6 +39,7 @@ class MainAgentState(TypedDict, total=False):
     current_input: str
     conversation_context: list[dict]
     conversation_summary: str
+    resource_context: str
     previous_artifacts: list[dict]
     resumed_from_turn_id: str
 
